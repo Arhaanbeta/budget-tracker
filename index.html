@@ -1517,8 +1517,8 @@ const VAULT_TABLES = [
    cols: ['Card', 'Bank', 'Card number', 'Name on card', 'Valid thru (MM/YY)', 'CVV', 'Card PIN', 'Login / user ID', 'Password', 'Notes']},
   {k: 'banks', title: 'Bank accounts', one: 'account', show: [0, 1],
    cols: ['Account', 'Bank', 'Account holder', 'Account number', 'IFSC', 'Customer ID', 'Net-banking user ID', 'Password', 'MPIN / UPI PIN', 'Notes']},
-  {k: 'personal', title: 'Personal information', one: 'item', show: [0, 2],
-   cols: ['Item', 'Detail', 'Notes']}
+  {k: 'personal', title: 'Personal information', one: 'item', show: [0, 1],
+   cols: ['Portal / item', 'ID / number', 'Password / note']}
 ];
 const VAULT_ROUNDS = 600000, VAULT_IDLE_MS = 120000, CLIP_MS = 30000;
 const V = {epoch: 0, loaded: false, loading: false, err: '', meta: null, enc: {}, key: null, rows: [], schema: null, open: {}, shown: {}, q: '', last: Date.now(), busy: false};
@@ -1633,7 +1633,7 @@ function renderVaultLists() {
     }).join('');
     return `<section class="card"><div class="sec-h"><h2>${esc(t.title)}</h2><span class="hint">${total} saved</span></div>
       ${rowsHtml || `<div class="empty">${q ? 'No match.' : 'Nothing yet. Add your first ' + t.one + '.'}</div>`}
-      <div class="row-actions"><button class="btn sm primary" type="button" data-act="v-add" data-t="${t.k}">+ Add ${t.one}</button><button class="btn sm" type="button" data-act="v-cols" data-t="${t.k}">Rename columns</button></div></section>`;
+      <div class="row-actions"><button class="btn sm primary" type="button" data-act="v-add" data-t="${t.k}">+ Add ${t.one}</button><button class="btn sm" type="button" data-act="v-import" data-t="${t.k}">Paste many rows</button><button class="btn sm" type="button" data-act="v-cols" data-t="${t.k}">Rename columns</button></div></section>`;
   }).join('') + (broken ? `<div class="banner warn">${broken} row${broken === 1 ? '' : 's'} could not be opened with this passphrase. They may have been changed outside the app.</div>` : '');
 }
 function vForm(html) { const f = $('#vaultForm'); f.innerHTML = html; $('#vaultScrim').hidden = false; setTimeout(() => { const i = f.querySelector('input'); if (i) i.focus(); }, 30); }
@@ -1740,6 +1740,59 @@ async function vSavePass() {
     V.key = key; await vDecryptAll(); $('#vaultScrim').hidden = true; toast('Passphrase changed'); renderVault();
   } catch (e) { err.textContent = e && e.code === 'wrong' ? 'The current passphrase is wrong.' : "Couldn't change it. Nothing was changed. Try again."; err.hidden = false; go.disabled = false; go.textContent = 'Change passphrase'; }
 }
+// Paste rows copied from Excel, Google Sheets or a note: one row per line, columns split by tabs
+// (or by 2+ spaces). Everything is encrypted on this phone before it is sent.
+function vParse(text, n) {
+  const lines = String(text).replace(/\r/g, '').split('\n').map(l => l.replace(/\s+$/, '')).filter(l => l.trim());
+  return lines.map(l => {
+    const parts = (l.includes('\t') ? l.split(/\t+/) : l.split(/ {2,}/)).map(x => x.trim());
+    const c = parts.slice(0, n); if (parts.length > n) c[n - 1] = parts.slice(n - 1).join(' ');
+    while (c.length < n) c.push('');
+    return c;
+  }).filter(c => c[0] && c.slice(1).some(Boolean));
+}
+function vImportForm(tk) {
+  const t = VAULT_TABLES.find(x => x.k === tk), cols = vCols(tk);
+  vForm(`<h3>Paste many rows: ${esc(t.title)}</h3>
+    <p class="muted" style="margin:0;font-size:13px">Copy the rows from Excel, Google Sheets or a note and paste them here, one row per line. Columns in order: <b>${cols.map(esc).join(' · ')}</b>.</p>
+    <input type="hidden" id="viT" value="${tk}">
+    <label class="field"><span>Rows</span><textarea id="viText" rows="8" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea></label>
+    <label class="ck-line"><input id="viHead" type="checkbox"> The first line is a heading row (skip it)</label>
+    <div class="banner" id="viPrev" hidden></div>
+    <div class="err" id="vfErr" hidden></div>
+    <div class="sheet-actions"><button type="button" class="btn ghost" data-act="v-close">Cancel</button><button type="button" class="btn primary" data-act="v-import-save" id="viGo" disabled>Add rows</button></div>`);
+}
+function vImportRows() {
+  const n = vCols($('#viT').value).length; let rows = vParse($('#viText').value, n);
+  if ($('#viHead').checked) rows = rows.slice(1);
+  return rows;
+}
+function vImportPreview() {
+  const box = $('#viPrev'), go = $('#viGo'); if (!box) return;
+  const first = $('#viText').value.split('\n')[0] || '';
+  if (/^\s*(portal|item|name|card|account)\b/i.test(first) && !$('#viHead').dataset.touched) $('#viHead').checked = true;
+  const rows = vImportRows();
+  go.disabled = !rows.length; go.textContent = rows.length ? `Add ${rows.length} row${rows.length === 1 ? '' : 's'}` : 'Add rows';
+  box.hidden = !rows.length;
+  box.innerHTML = rows.length ? `<b>${rows.length} row${rows.length === 1 ? '' : 's'} found.</b> First few: ` + rows.slice(0, 4).map(r => esc(r[0]) + ' · ' + esc(r[1] || '—') + (r.length > 2 ? ' · ' + (r[2] ? '••••' : '—') : '')).join('; ') + (rows.length > 4 ? '…' : '') : '';
+}
+async function vImportSave() {
+  const tk = $('#viT').value, rows = vImportRows(), err = $('#vfErr'), go = $('#viGo');
+  if (!rows.length || V.busy) return;
+  V.busy = true; go.disabled = true; go.textContent = 'Encrypting…'; err.hidden = true;
+  try {
+    const ep = V.epoch, ops = [], now = Date.now();
+    for (let i = 0; i < rows.length; i++) { const id = vId(); ops.push({t: 'vput', id, data: await vSeal(V.key, id, {t: tk, c: rows[i], at: now + i})}); }
+    go.textContent = 'Saving…';
+    await vCall(ops);
+    if (ep !== V.epoch) { V.busy = false; return; }
+    const missing = ops.filter(o => V.enc[o.id] !== o.data).length;
+    if (missing) throw {code: 'not_saved'};
+    await vDecryptAll(); $('#vaultScrim').hidden = true; $('#vaultForm').innerHTML = '';
+    toast(`${rows.length} rows added, encrypted`); renderVaultLists();
+  } catch (e) { err.textContent = "Couldn't save the rows. Nothing was added. Check the connection and try again."; err.hidden = false; go.disabled = false; go.textContent = `Add ${rows.length} rows`; }
+  V.busy = false;
+}
 let clipTimer = null;
 async function vCopy(text) {
   try { await navigator.clipboard.writeText(text); toast('Copied. Clears in 30 seconds.'); }
@@ -1766,6 +1819,8 @@ document.addEventListener('click', ev => {
   else if (a === 'v-save-again') vSaveRow(true);
   else if (a === 'v-close') { $('#vaultScrim').hidden = true; $('#vaultForm').innerHTML = ''; }
   else if (a === 'v-cols') vColsForm(b.dataset.t);
+  else if (a === 'v-import') vImportForm(b.dataset.t);
+  else if (a === 'v-import-save') vImportSave();
   else if (a === 'v-cols-save') vSaveCols();
   else if (a === 'v-pass') vPassForm();
   else if (a === 'v-pass-save') vSavePass();
@@ -1774,7 +1829,8 @@ document.addEventListener('click', ev => {
     vCall([{t: 'vdel', id: b.dataset.id}]).then(() => vDecryptAll()).then(() => { toast('Deleted'); renderVaultLists(); }).catch(() => toast("Couldn't delete. Try again.", 'bad'));
   }
 });
-document.addEventListener('input', ev => { if (ev.target && ev.target.id === 'vQ') { V.q = ev.target.value; renderVaultLists(); } });
+document.addEventListener('input', ev => { if (ev.target && ev.target.id === 'vQ') { V.q = ev.target.value; renderVaultLists(); } else if (ev.target && ev.target.id === 'viText') vImportPreview(); });
+document.addEventListener('change', ev => { if (ev.target && ev.target.id === 'viHead') { ev.target.dataset.touched = '1'; vImportPreview(); } });
 ['pointerdown', 'keydown'].forEach(t => document.addEventListener(t, () => { V.last = Date.now(); }, true));
 function vIdleCheck() { if (V.key && Date.now() - V.last > VAULT_IDLE_MS) lockVault('Vault locked after 2 minutes idle'); }
 setInterval(vIdleCheck, 5000);
