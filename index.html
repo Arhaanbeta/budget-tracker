@@ -1451,9 +1451,9 @@ function renderConnect(gate) {
   const c = readConn() || {};
   gate.innerHTML = `<h2>Connect to your Google Sheet</h2>
     <p>Your entries are stored in a Google Sheet, so every phone you connect sees and adds to the same data. Do this once on each phone.</p>
-    <ol class="steps"><li>Paste the <b>Web app URL</b> from Apps Script (it ends in <b>/exec</b>).</li><li>Type the <b>access key</b> you saved as APP_KEY.</li></ol>
+    <ol class="steps"><li>Paste your <b>phone link</b> (the long one with <b>#connect=</b>) in the first box and tap Connect. The key box can stay empty.</li><li>Or paste the <b>Web app URL</b> (ends in <b>/exec</b>) and type the <b>access key</b>.</li></ol>
     <form class="connect" id="connForm" novalidate>
-      <label class="field"><span>Web app URL</span><input id="cUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(c.url || '')}"></label>
+      <label class="field"><span>Phone link or Web app URL</span><input id="cUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(c.url || '')}"></label>
       <label class="field"><span>Access key</span><input id="cKey" type="password" autocomplete="current-password" spellcheck="false" value="${esc(c.key || '')}"></label>
       <div class="err" id="cErr" hidden></div>
       <div><button class="btn primary" type="submit" id="cGo">Connect</button></div>
@@ -1462,10 +1462,14 @@ function renderConnect(gate) {
 }
 async function connect(ev) {
   ev.preventDefault();
-  const url = $('#cUrl').value.trim(), key = $('#cKey').value, err = $('#cErr'), go = $('#cGo');
+  let url = $('#cUrl').value.trim(), key = $('#cKey').value.trim();
+  const err = $('#cErr'), go = $('#cGo');
   err.hidden = true;
-  if (!/^https:\/\/script\.google(usercontent)?\.com\/.+/.test(url)) { err.textContent = 'Paste the Web app URL from Apps Script. It starts with https://script.google.com/'; err.hidden = false; return; }
-  if (!key) { err.textContent = 'Type the access key.'; err.hidden = false; return; }
+  // Accept the whole one-tap phone link pasted into the URL box.
+  const lm = url.match(/#connect=([A-Za-z0-9_\-+/=]+)/);
+  if (lm) { try { const j = JSON.parse(atob(lm[1].replace(/-/g, '+').replace(/_/g, '/'))); url = j.url || ''; key = j.key || ''; } catch (e) {} }
+  if (!/^https:\/\/script\.google(usercontent)?\.com\/.+/.test(url)) { err.textContent = 'Paste the phone link, or the Web app URL from Apps Script (it starts with https://script.google.com/)'; err.hidden = false; return; }
+  if (!key) { err.textContent = 'Paste the whole phone link, or type the access key.'; err.hidden = false; return; }
   go.disabled = true; go.textContent = 'Connecting…';
   try {
     const j = await call([], url, key);
