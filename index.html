@@ -528,7 +528,7 @@ function writeErr(e) {
 const LS_CONN = 'budgetTracker.conn.v1', LS_OUT = 'budgetTracker.outbox.v1', LS_CACHE = 'budgetTracker.cache.v1';
 // The address of the Apps Script back end and the Google sign-in client. Neither is secret:
 // the script only answers people who sign in with an email on the sheet's Users tab.
-const API_URL = 'https://script.google.com/macros/s/AKfycbwOibryfFDje4-cqAu3wP-cDBjZd5BPwgCKYmZd01p3GxdPvPeZLucj_jhn4oMnR8KX/exec';
+const API_URL = 'https://script.google.com/macros/s/AKfycbzv2I-UKb0QByamS0r-kquozWSSbBVBPw7TWpIWX8v4KRfNBPDPq_eeymhL8SJixfAP/exec';
 const GOOGLE_CLIENT_ID = '';
 const Sync = { url: '', key: '', session: '', me: null, users: null, outbox: [], busy: false, again: false, last: 0, err: '', timer: null };
 function saveConn() { try { localStorage.setItem(LS_CONN, JSON.stringify({url: Sync.url, key: Sync.key, session: Sync.session, me: Sync.me})); } catch (e) {} }
@@ -566,7 +566,7 @@ async function call(ops, auth = {}) {
   const body = Object.assign({session: Sync.session || undefined, key: Sync.session ? undefined : (Sync.key || undefined)}, auth, {ops});
   try {
     // A plain-text body keeps this a "simple" request, so Google's web app answers without a CORS preflight.
-    const r = await fetch(auth.url || Sync.url || API_URL, {method: 'POST', body: JSON.stringify(body), redirect: 'follow', signal: ctl.signal});
+    const r = await fetch(API_URL, {method: 'POST', body: JSON.stringify(body), redirect: 'follow', signal: ctl.signal});
     const j = await r.json().catch(() => null);
     if (!j) throw {code: 'bad_reply'};
     if (!j.ok) throw {code: j.error || 'failed'};
@@ -1548,7 +1548,7 @@ function linkForm() {
     </form>`;
 }
 async function finishSignIn(j, extra) {
-  Object.assign(Sync, extra); Sync.url = Sync.url || API_URL; Sync.err = ''; Sync.last = Date.now();
+  Object.assign(Sync, extra); Sync.url = API_URL; Sync.err = ''; Sync.last = Date.now();
   state.got.config = true; state.connErr = ''; state.mode = 'cloud';
   takeReply(j); Sync.outbox.forEach(applyLocal); saveCache();
   toast(Sync.me && Sync.me.email ? 'Signed in as ' + Sync.me.email : 'Connected'); render();
@@ -1572,7 +1572,7 @@ async function connect(ev) {
   const err = $('#cErr'), go = $('#cGo');
   err.hidden = true;
   const lm = raw.match(/#connect=([A-Za-z0-9_\-+/=]+)/);
-  if (lm) { try { const j = JSON.parse(atob(lm[1].replace(/-/g, '+').replace(/_/g, '/'))); url = j.url || API_URL; key = j.key || ''; } catch (e) {} }
+  if (lm) { try { const j = JSON.parse(atob(lm[1].replace(/-/g, '+').replace(/_/g, '/'))); key = j.key || ''; } catch (e) {} }
   if (!key) { err.textContent = 'Paste the whole set-up link.'; err.hidden = false; return; }
   go.disabled = true; go.textContent = 'Connecting…';
   try { const j = await call([], {url, key, session: undefined}); await finishSignIn(j, {url, key, session: ''}); }
@@ -1628,7 +1628,7 @@ function start() {
   if (lg) history.replaceState(null, '', location.pathname + '#overview');
   state.view = VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'overview';
   const c = readConn() || {};
-  Sync.url = c.url || API_URL; Sync.key = c.key || ''; Sync.session = c.session || ''; Sync.me = c.me || null;
+  Sync.url = API_URL; Sync.key = c.key || ''; Sync.session = c.session || ''; Sync.me = c.me || null;
   if (signedIn()) { state.mode = 'cloud'; loadCache(); }
   if (lg && !Sync.session) { try { Sync.outbox = JSON.parse(localStorage.getItem(LS_OUT) || '[]') || []; } catch (e) {} useLoginLink(lg[1]); }
   else render();
