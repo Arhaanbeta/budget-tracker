@@ -5,9 +5,10 @@
  * "Budget Tracker data" spreadsheet and deploy it as a Web app
  * (Execute as: Me, Who has access: Anyone).
  *
- * Sign-in: the app sends a Google ID token once. The script checks it with Google,
- * checks the email is on the Users tab, and hands back a session that the phone
- * keeps for good. Removing someone from the Users tab locks them out at once.
+ * Sign-in: a person types their email; if it is on the Users tab, the script emails
+ * them a one-time link. Opening the link gives the phone a session it keeps for good.
+ * (Sign in with Google also works once a Client ID is set in the Config tab.)
+ * Removing someone from the Users tab locks them out at once.
  *
  * The app sends one POST per sync: {session, ops: [...]}. Each op is an
  * upsert or a delete, so sending the same op twice is harmless.
@@ -25,6 +26,8 @@ var TABS = {
 var E = {id: 0, date: 1, cycle: 2, type: 3, catName: 4, amount: 5, acctName: 6, cardName: 7, note: 8, member: 9, tag: 10,
          refund: 11, cat: 12, acct: 13, card: 14, at: 15, saved: 16};
 var CHUNK = 40000; // characters per Config cell
+var APP_URL = 'https://arhaanbeta.github.io/budget-tracker/';
+var LINK_MINUTES = 30;
 
 function doGet() {
   return HtmlService.createHtmlOutput('<meta name="viewport" content="width=device-width,initial-scale=1">' +
@@ -42,6 +45,7 @@ function doPost(e) {
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     ensureTabs(ss);
+    if (req.emailLink) return out(sendLoginLink(ss, req.emailLink));
     var who = authorise(ss, req);
     if (!who.ok) return out(who);
     var ops = Array.isArray(req.ops) ? req.ops : [];
@@ -70,12 +74,20 @@ function out(obj) {
 /* ---------- sign-in ---------- */
 function authorise(ss, req) {
   var props = PropertiesService.getScriptProperties();
+  if (req.loginCode) {
+    var lk = 'login:' + String(req.loginCode).replace(/[^a-f0-9]/g, ''), lraw = props.getProperty(lk);
+    if (!lraw) return {ok: false, error: 'link_used'};
+    props.deleteProperty(lk); // each link works once
+    var L = JSON.parse(lraw);
+    if (L.exp < Date.now()) return {ok: false, error: 'link_expired'};
+    var lu = findUser(ss, L.email);
+    if (!lu) return {ok: false, error: 'not_allowed'};
+    return {ok: true, user: lu, session: newSession(props, lu.email)};
+  }
   if (req.idToken) {
     var g = verifyGoogle(ss, req.idToken);
     if (!g.ok) return g;
-    var tok = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '');
-    props.setProperty('sess:' + tok, JSON.stringify({email: g.user.email, at: Date.now()}));
-    return {ok: true, user: g.user, session: tok};
+    return {ok: true, user: g.user, session: newSession(props, g.user.email)};
   }
   if (req.session) {
     var raw = props.getProperty('sess:' + req.session);
@@ -88,6 +100,34 @@ function authorise(ss, req) {
   var key = props.getProperty('APP_KEY');
   if (key && req.key && req.key === key) return {ok: true, user: {email: '', name: 'Set-up link', role: 'Owner'}};
   return {ok: false, error: req.key ? 'bad_key' : 'signed_out'};
+}
+function newToken() { return (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, ''); }
+function newSession(props, email) {
+  var tok = newToken();
+  props.setProperty('sess:' + tok, JSON.stringify({email: email, at: Date.now()}));
+  return tok;
+}
+// Always answers the same way, so nobody can use it to find out who is on the list.
+function sendLoginLink(ss, email) {
+  var u = findUser(ss, email);
+  if (!u) return {ok: true, sent: true};
+  var props = PropertiesService.getScriptProperties(), rk = 'rate:' + u.email;
+  var r = JSON.parse(props.getProperty(rk) || '{"n":0,"t":0}');
+  if (Date.now() - r.t > 3600000) r = {n: 0, t: Date.now()};
+  if (r.n >= 5) return {ok: false, error: 'too_many'};
+  r.n++; props.setProperty(rk, JSON.stringify(r));
+  var code = newToken();
+  props.setProperty('login:' + code, JSON.stringify({email: u.email, exp: Date.now() + LINK_MINUTES * 60000}));
+  var link = APP_URL + '#login=' + code;
+  MailApp.sendEmail({
+    to: u.email, name: 'Budget Tracker', subject: 'Your Budget Tracker sign-in link',
+    body: 'Open this link on the phone you want to sign in on:\n\n' + link + '\n\nIt works once and expires in ' + LINK_MINUTES + ' minutes. If you did not ask for it, ignore this email.',
+    htmlBody: '<div style="font:16px/1.5 Arial,sans-serif;max-width:520px">' +
+      '<p>Tap the button on the phone you want to sign in on. That phone then stays signed in.</p>' +
+      '<p><a href="' + link + '" style="display:inline-block;background:#2c3a8c;color:#fff;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:bold">Sign in to Budget Tracker</a></p>' +
+      '<p style="color:#666;font-size:13px">The link works once and expires in ' + LINK_MINUTES + ' minutes. If you did not ask for it, ignore this email.</p></div>'
+  });
+  return {ok: true, sent: true};
 }
 function verifyGoogle(ss, idToken) {
   var cid = configValue(ss, 'google client id');

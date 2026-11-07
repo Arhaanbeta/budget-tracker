@@ -17,16 +17,17 @@ You can also type a row straight into the `Entries` tab: fill **Date**, **Catego
 
 ## Signing in
 
-Tap **Continue with Google** once on each phone. The phone then stays signed in for good.
+Type your Gmail address and tap **Email me a sign-in link**. Open the email on the same phone and tap **Sign in to Budget Tracker**. The phone then stays signed in for good.
 
-- Only Google accounts listed on the sheet's **Users** tab can sign in. The owner adds or removes people in the app under **Setup → Family access** (or straight in the tab).
+- Only emails listed on the sheet's **Users** tab get a link. The owner adds or removes people in the app under **Setup → Family access** (or straight in the tab).
+- Each link works once and expires after 30 minutes. At most 5 links per hour per person.
 - Removing someone locks them out on their next sync, and their phone stops showing the data.
-- The script checks every sign-in with Google (`oauth2.googleapis.com/tokeninfo`): the token must be for this app's Client ID and for a verified email on the Users tab.
+- Optional: **Continue with Google** appears too once a Google OAuth Client ID is set (see below). The script checks every Google sign-in with `oauth2.googleapis.com/tokeninfo`.
 
 ## One-time setup
 
-1. **Google sign-in client** (Google Cloud Console → Google Auth Platform): create a *Web application* OAuth client with the authorised JavaScript origin `https://arhaanbeta.github.io`. Put its Client ID in `GOOGLE_CLIENT_ID` in `index.html` and in the sheet's **Config** tab (`google client id`).
-2. **Apps Script**: in the sheet, **Extensions → Apps Script**, paste [`apps-script/Code.gs`](apps-script/Code.gs), then **Deploy → Manage deployments → Edit → Version: New version → Deploy**, and allow the new permission (it calls Google to check sign-ins).
+1. *Optional* **Google sign-in client** (Google Cloud Console → Google Auth Platform): create a *Web application* OAuth client with the authorised JavaScript origin `https://arhaanbeta.github.io`. Put its Client ID in `GOOGLE_CLIENT_ID` in `index.html` and in the sheet's **Config** tab (`google client id`).
+2. **Apps Script**: in the sheet, **Extensions → Apps Script**, paste [`apps-script/Code.gs`](apps-script/Code.gs), then **Deploy → Manage deployments → Edit → Version: New version → Deploy**, and allow the new permissions (send sign-in emails from your Gmail, and ask Google to check Google sign-ins).
 3. Optional, after Google sign-in works: delete the `APP_KEY` script property to switch off the old set-up links.
 
 **Updating the script later:** paste the new code, then **Deploy → Manage deployments → Edit (pencil) → Version: New version → Deploy**. The URL stays the same.

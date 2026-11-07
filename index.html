@@ -1464,7 +1464,11 @@ $('#main').addEventListener('change', async ev => {
   try { await API.putFix(el.dataset.card, el.dataset.sd, v); toast(v === null ? 'Using the calculated amount' : 'Your figure saved'); } catch (e) { toast(writeErr(e), 'bad'); }
 });
 document.addEventListener('toggle', ev => { const d = ev.target; if (d && d.matches && d.matches('details.ct-hist')) state.openHist[d.dataset.card] = d.open; }, true);
-window.addEventListener('hashchange', () => setView(location.hash.slice(1)));
+window.addEventListener('hashchange', () => {
+  const lg = location.hash.match(/^#login=([a-f0-9]{20,80})$/);
+  if (lg) { history.replaceState(null, '', location.pathname + '#overview'); if (!Sync.session) useLoginLink(lg[1]); setView('overview'); return; }
+  setView(location.hash.slice(1));
+});
 let rz; window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if (state.config) setView(state.view); }, 200); });
 
 /* ---------- sign-in ---------- */
@@ -1485,21 +1489,55 @@ function signInMsg(code, email) {
   if (code === 'bad_token') return 'Google sign-in could not be checked. Try again.';
   return "Couldn't reach the sheet. Check the internet connection, then try again.";
 }
+const LS_EMAIL = 'budgetTracker.email.v1';
 function renderSignIn(gate) {
   const msg = state.connErr ? `<div class="banner warn">${esc(state.connErr)}</div>` : '';
-  if (GOOGLE_CLIENT_ID) {
-    gate.innerHTML = `<h2>Sign in</h2>${msg}
-      <p>Use the Google account the family owner has added. You sign in once on each phone; it stays signed in.</p>
-      <div id="gBtn" style="min-height:44px"></div>
-      <div class="err" id="gErr" hidden></div>
-      <details style="margin-top:6px"><summary class="hint" style="cursor:pointer">Have a set-up link instead?</summary>${linkForm()}</details>`;
-    loadGis().then(() => {
-      const el = $('#gBtn'); if (!el) return;
-      google.accounts.id.renderButton(el, {type: 'standard', theme: 'filled_blue', size: 'large', shape: 'pill', text: 'continue_with', logo_alignment: 'left', width: Math.min(320, el.clientWidth || 320)});
-      google.accounts.id.prompt();
-    }).catch(() => { const e = $('#gErr'); if (e) { e.textContent = "Google sign-in didn't load. Check the connection and reload."; e.hidden = false; } });
-  } else {
-    gate.innerHTML = `<h2>Connect this phone</h2>${msg}<p>Paste your set-up link and tap Connect. You do this once on each phone.</p>${linkForm()}`;
+  let last = ''; try { last = localStorage.getItem(LS_EMAIL) || ''; } catch (e) {}
+  if (state.signingIn) { gate.innerHTML = `<h2>Signing you in…</h2><p>One moment.</p>`; return; }
+  gate.innerHTML = `<h2>Sign in</h2>${msg}
+    <p>You sign in once on each phone. After that it stays signed in.</p>
+    ${GOOGLE_CLIENT_ID ? `<div id="gBtn" style="min-height:44px"></div><div class="err" id="gErr" hidden></div><p class="hint" style="margin:0">or</p>` : ''}
+    <form class="connect" id="mailForm" novalidate>
+      <label class="field"><span>Your Gmail address</span><input id="mEmail" type="email" inputmode="email" autocomplete="email" spellcheck="false" placeholder="name@gmail.com" value="${esc(last)}"></label>
+      <div class="err" id="mErr" hidden></div>
+      <div><button class="btn primary" type="submit" id="mGo">Email me a sign-in link</button></div>
+    </form>
+    <div class="banner" id="mSent" hidden></div>
+    <details style="margin-top:6px"><summary class="hint" style="cursor:pointer">Have a set-up link instead?</summary>${linkForm()}</details>`;
+  if (GOOGLE_CLIENT_ID) loadGis().then(() => {
+    const el = $('#gBtn'); if (!el) return;
+    google.accounts.id.renderButton(el, {type: 'standard', theme: 'filled_blue', size: 'large', shape: 'pill', text: 'continue_with', logo_alignment: 'left', width: Math.min(320, el.clientWidth || 320)});
+    google.accounts.id.prompt();
+  }).catch(() => { const e = $('#gErr'); if (e) { e.textContent = "Google sign-in didn't load. Use the email link below."; e.hidden = false; } });
+}
+async function sendMailLink(ev) {
+  ev.preventDefault();
+  const email = $('#mEmail').value.trim().toLowerCase(), err = $('#mErr'), go = $('#mGo'), sent = $('#mSent');
+  err.hidden = true; sent.hidden = true;
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { err.textContent = 'Type your full email address, like name@gmail.com.'; err.hidden = false; return; }
+  try { localStorage.setItem(LS_EMAIL, email); } catch (e) {}
+  go.disabled = true; go.textContent = 'Sending…';
+  try {
+    await call([], {emailLink: email, session: undefined, key: undefined});
+    sent.innerHTML = `<b>Check your Gmail.</b> If ${esc(email)} is on the family list, a sign-in email is on its way. Open it <b>on this phone</b> and tap <b>Sign in to Budget Tracker</b>. Not there in a minute? Look in Spam.`;
+    sent.hidden = false; go.textContent = 'Send again';
+  } catch (e) {
+    err.textContent = e && e.code === 'too_many' ? 'Too many links asked for in the last hour. Use the newest email you got, or try again later.'
+      : e && e.code === 'signed_out' ? 'The sheet needs the latest script before email sign-in works (Apps Script → Deploy → Manage deployments → New version).'
+      : signInMsg(e && e.code);
+    err.hidden = false; go.textContent = 'Email me a sign-in link';
+  }
+  go.disabled = false;
+}
+async function useLoginLink(code) {
+  state.signingIn = true; render();
+  try { const j = await call([], {loginCode: code, session: undefined, key: undefined}); state.signingIn = false; await finishSignIn(j, {session: j.session, key: ''}); }
+  catch (e) {
+    state.signingIn = false;
+    state.connErr = e && e.code === 'link_used' ? 'That sign-in link was already used. Ask for a new one below.'
+      : e && e.code === 'link_expired' ? 'That sign-in link has expired. Ask for a new one below.'
+      : e && e.code === 'not_allowed' ? 'This email is not on the family list.' : signInMsg(e && e.code);
+    render();
   }
 }
 function linkForm() {
@@ -1554,6 +1592,7 @@ function accountHtml() {
 }
 document.addEventListener('submit', ev => {
   if (ev.target && ev.target.id === 'connForm') connect(ev);
+  else if (ev.target && ev.target.id === 'mailForm') sendMailLink(ev);
   else if (ev.target && ev.target.id === 'addUserForm') {
     ev.preventDefault(); const email = $('#newUser').value.trim().toLowerCase();
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { toast('Type a full email address', 'bad'); return; }
@@ -1584,11 +1623,15 @@ function start() {
       if (j && /^https:\/\/script\.google\.com\//.test(j.url) && j.key && !(readConn() || {}).session) localStorage.setItem(LS_CONN, JSON.stringify({url: j.url, key: j.key})); } catch (e) {}
     history.replaceState(null, '', location.pathname + '#overview');
   }
+  // Emailed sign-in link: #login=<one-time code>.
+  const lg = location.hash.match(/^#login=([a-f0-9]{20,80})$/);
+  if (lg) history.replaceState(null, '', location.pathname + '#overview');
   state.view = VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'overview';
   const c = readConn() || {};
   Sync.url = c.url || API_URL; Sync.key = c.key || ''; Sync.session = c.session || ''; Sync.me = c.me || null;
   if (signedIn()) { state.mode = 'cloud'; loadCache(); }
-  render();
+  if (lg && !Sync.session) { try { Sync.outbox = JSON.parse(localStorage.getItem(LS_OUT) || '[]') || []; } catch (e) {} useLoginLink(lg[1]); }
+  else render();
   if (signedIn()) flush();
   // Pick up entries made on other phones.
   setInterval(() => { if (signedIn() && document.visibilityState === 'visible' && !state.dirty) flush(); }, 30000);
