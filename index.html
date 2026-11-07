@@ -528,7 +528,7 @@ function writeErr(e) {
 const LS_CONN = 'budgetTracker.conn.v1', LS_OUT = 'budgetTracker.outbox.v1', LS_CACHE = 'budgetTracker.cache.v1';
 // The address of the Apps Script back end and the Google sign-in client. Neither is secret:
 // the script only answers people who sign in with an email on the sheet's Users tab.
-const API_URL = 'https://script.google.com/macros/s/AKfycbzv2I-UKb0QByamS0r-kquozWSSbBVBPw7TWpIWX8v4KRfNBPDPq_eeymhL8SJixfAP/exec';
+const API_URL = 'https://script.google.com/macros/s/AKfycbxGbgnZt44fQscj8ZXm7KkPCf-T5VY5A3qAC13nEX8d0fzL5ItN5CzONplic0AalwGB/exec';
 const GOOGLE_CLIENT_ID = '';
 const Sync = { url: '', key: '', session: '', me: null, users: null, outbox: [], busy: false, again: false, last: 0, err: '', timer: null };
 function saveConn() { try { localStorage.setItem(LS_CONN, JSON.stringify({url: Sync.url, key: Sync.key, session: Sync.session, me: Sync.me})); } catch (e) {} }
