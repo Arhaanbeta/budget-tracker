@@ -571,6 +571,10 @@ async function call(ops, auth = {}) {
     if (!j) throw {code: 'bad_reply'};
     if (!j.ok) throw {code: j.error || 'failed'};
     return j;
+  } catch (e) {
+    // A blocked reply (Google sends a login page with no CORS headers) looks like a network error.
+    if (e && e.code) throw e;
+    throw {code: navigator.onLine === false ? 'offline' : 'no_answer'};
   } finally { clearTimeout(to); }
 }
 async function flush() {
@@ -1487,6 +1491,8 @@ function signInMsg(code, email) {
   if (code === 'not_allowed') return `${email ? esc(email) : 'This Google account'} isn't on the family list yet. Ask the owner to add it in Setup → Family access.`;
   if (code === 'no_client_id') return 'Google sign-in is not switched on in the sheet yet (Config tab: google client id).';
   if (code === 'bad_token') return 'Google sign-in could not be checked. Try again.';
+  if (code === 'no_answer' || code === 'bad_reply') return "The sheet's script didn't answer. In Apps Script, open Deploy → Manage deployments → pencil, set Who has access to <b>Anyone</b>, pick New version, and Deploy.";
+  if (code === 'offline') return 'This phone is offline. Connect to the internet and try again.';
   return "Couldn't reach the sheet. Check the internet connection, then try again.";
 }
 const LS_EMAIL = 'budgetTracker.email.v1';
@@ -1522,7 +1528,7 @@ async function sendMailLink(ev) {
     sent.innerHTML = `<b>Check your Gmail.</b> If ${esc(email)} is on the family list, a sign-in email is on its way. Open it <b>on this phone</b> and tap <b>Sign in to Budget Tracker</b>. Not there in a minute? Look in Spam.`;
     sent.hidden = false; go.textContent = 'Send again';
   } catch (e) {
-    err.textContent = e && e.code === 'too_many' ? 'Too many links asked for in the last hour. Use the newest email you got, or try again later.'
+    err.innerHTML = e && e.code === 'too_many' ? 'Too many links asked for in the last hour. Use the newest email you got, or try again later.'
       : e && e.code === 'signed_out' ? 'The sheet needs the latest script before email sign-in works (Apps Script → Deploy → Manage deployments → New version).'
       : signInMsg(e && e.code);
     err.hidden = false; go.textContent = 'Email me a sign-in link';
@@ -1576,7 +1582,7 @@ async function connect(ev) {
   if (!key) { err.textContent = 'Paste the whole set-up link.'; err.hidden = false; return; }
   go.disabled = true; go.textContent = 'Connecting…';
   try { const j = await call([], {url, key, session: undefined}); await finishSignIn(j, {url, key, session: ''}); }
-  catch (e) { err.textContent = e && e.code === 'bad_key' ? 'That link has been switched off. Sign in with Google instead.' : signInMsg(e && e.code); err.hidden = false; go.disabled = false; go.textContent = 'Connect'; }
+  catch (e) { err.innerHTML = e && e.code === 'bad_key' ? 'That link has been switched off. Use the email sign-in above.' : signInMsg(e && e.code); err.hidden = false; go.disabled = false; go.textContent = 'Connect'; }
 }
 function accountHtml() {
   const me = Sync.me || {}, owner = me.role === 'Owner';
