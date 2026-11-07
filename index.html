@@ -526,7 +526,12 @@ function writeErr(e) {
    The sheet's reply is the full data set, so every phone ends up with the same picture.
    Changes made while offline wait in the outbox and go out when the connection returns. */
 const LS_CONN = 'budgetTracker.conn.v1', LS_OUT = 'budgetTracker.outbox.v1', LS_CACHE = 'budgetTracker.cache.v1';
-const Sync = { url: '', key: '', outbox: [], busy: false, again: false, last: 0, err: '', timer: null };
+// The address of the Apps Script back end and the Google sign-in client. Neither is secret:
+// the script only answers people who sign in with an email on the sheet's Users tab.
+const API_URL = 'https://script.google.com/macros/s/AKfycbwOibryfFDje4-cqAu3wP-cDBjZd5BPwgCKYmZd01p3GxdPvPeZLucj_jhn4oMnR8KX/exec';
+const GOOGLE_CLIENT_ID = '';
+const Sync = { url: '', key: '', session: '', me: null, users: null, outbox: [], busy: false, again: false, last: 0, err: '', timer: null };
+function saveConn() { try { localStorage.setItem(LS_CONN, JSON.stringify({url: Sync.url, key: Sync.key, session: Sync.session, me: Sync.me})); } catch (e) {} }
 function readConn() { try { return JSON.parse(localStorage.getItem(LS_CONN) || 'null'); } catch (e) { return null; } }
 function saveCache() {
   try { localStorage.setItem(LS_CACHE, JSON.stringify({config: state.config, cycles: state.cycles, balances: state.balances, cardfix: state.cardfix, last: Sync.last})); } catch (e) {}
@@ -556,11 +561,12 @@ function fromServer(d) {
   state.config = d.config || null; state.cycles = {}; state.balances = d.balances || {}; state.cardfix = d.cardfix || {};
   if (state.config) (d.txns || []).forEach(placeTxn);
 }
-async function call(ops, url = Sync.url, key = Sync.key) {
+async function call(ops, auth = {}) {
   const ctl = new AbortController(), to = setTimeout(() => ctl.abort(), 45000);
+  const body = Object.assign({session: Sync.session || undefined, key: Sync.session ? undefined : (Sync.key || undefined)}, auth, {ops});
   try {
     // A plain-text body keeps this a "simple" request, so Google's web app answers without a CORS preflight.
-    const r = await fetch(url, {method: 'POST', body: JSON.stringify({key, ops}), redirect: 'follow', signal: ctl.signal});
+    const r = await fetch(auth.url || Sync.url || API_URL, {method: 'POST', body: JSON.stringify(body), redirect: 'follow', signal: ctl.signal});
     const j = await r.json().catch(() => null);
     if (!j) throw {code: 'bad_reply'};
     if (!j.ok) throw {code: j.error || 'failed'};
@@ -568,26 +574,42 @@ async function call(ops, url = Sync.url, key = Sync.key) {
   } finally { clearTimeout(to); }
 }
 async function flush() {
-  if (!Sync.url) return;
+  if (!signedIn()) return;
   if (Sync.busy) { Sync.again = true; return; }
   Sync.busy = true; Sync.again = false;
   const sent = Sync.outbox.slice(0, 200);
   try {
     const j = await call(sent);
     Sync.outbox.splice(0, sent.length);
-    fromServer(j.data);
+    takeReply(j);
     Sync.outbox.forEach(applyLocal); // changes made while this request was in flight
     Sync.last = Date.now(); Sync.err = ''; state.got.config = true; state.stale = false; state.connErr = '';
     saveCache();
   } catch (e) {
     Sync.err = (e && e.code) || (navigator.onLine === false ? 'offline' : 'network');
-    if (Sync.err === 'bad_key') state.connErr = 'The sheet refused the access key. Open Setup → Google Sheets and connect again.';
-    else if (Sync.err === 'no_key_set') state.connErr = 'The Apps Script has no APP_KEY set yet. Add it in Project Settings → Script properties.';
+    if (Sync.err === 'signed_out' || Sync.err === 'not_allowed' || Sync.err === 'bad_key') { forgetSignIn(Sync.err); Sync.busy = false; render(); return; }
   }
   Sync.busy = false;
   render();
   if (Sync.again || (Sync.outbox.length && !Sync.err)) setTimeout(flush, 300);
   else if (Sync.outbox.length) { clearTimeout(Sync.timer); Sync.timer = setTimeout(flush, 15000); }
+}
+function takeReply(j) {
+  fromServer(j.data);
+  if (j.me) Sync.me = j.me;
+  Sync.users = j.users || null;
+  if (j.session) Sync.session = j.session;
+  saveConn();
+}
+// Drop this phone's sign-in but keep any unsynced changes, so they go up after the next sign-in.
+function forgetSignIn(reason) {
+  Sync.session = ''; Sync.key = ''; Sync.me = null; Sync.users = null; Sync.err = '';
+  state.connErr = reason === 'not_allowed' ? 'This Google account is no longer on the family list.' : reason === 'bad_key' ? 'That set-up link has been switched off. Sign in with Google.' : '';
+  // Hide the saved copy of the family's data until someone signs in again.
+  state.config = null; state.cycles = {}; state.balances = {}; state.cardfix = {}; state.got.config = false; state.dirty = false; state.draft = null;
+  if (reason === 'not_allowed') Sync.outbox = [];
+  try { localStorage.removeItem(LS_CACHE); } catch (e) {}
+  saveConn(); saveCache();
 }
 function queue(op) { applyLocal(op); Sync.outbox.push(op); saveCache(); render(); flush(); }
 const API = {
@@ -603,8 +625,9 @@ const API = {
     queue({t: 'replace', config: clone(data.config), txns, balances: clone(data.balances || {}), cardfix: clone(data.cardfix || {})});
   }
 };
+function signedIn() { return !!(Sync.session || Sync.key); }
 function syncLabel() {
-  if (!Sync.url) return 'Not connected';
+  if (!signedIn()) return 'Not signed in';
   const n = Sync.outbox.length;
   if (Sync.busy) return n ? `Syncing ${n} change${n === 1 ? '' : 's'}…` : 'Syncing…';
   if (n) return `${n} change${n === 1 ? '' : 's'} waiting to sync`;
@@ -652,7 +675,7 @@ function cycleTotals(list, X) {
 /* ---------- chrome ---------- */
 function renderChrome(X) {
   const st = $('#status');
-  st.className = 'status ' + (!Sync.url ? '' : Sync.busy ? 'sync' : Sync.outbox.length || (Sync.err && Sync.err !== 'offline' && Sync.err !== 'network') ? 'bad' : Sync.err ? 'local' : Sync.last ? 'cloud' : '');
+  st.className = 'status ' + (!signedIn() ? '' : Sync.busy ? 'sync' : Sync.outbox.length || (Sync.err && Sync.err !== 'offline' && Sync.err !== 'network') ? 'bad' : Sync.err ? 'local' : Sync.last ? 'cloud' : '');
   st.textContent = syncLabel();
   document.querySelectorAll('.tabs a').forEach(a => a.setAttribute('aria-current', a.dataset.v === state.view ? 'page' : 'false'));
   const ready = !!state.config;
@@ -677,7 +700,7 @@ function renderBanner() {
   const b = $('#banner'); let h = '';
   if (state.connErr) h = `<div class="banner warn">${esc(state.connErr)}</div>`;
   else if (state.stale) h = `<div class="banner warn">Can't reach your saved data yet. What you see may be out of date.</div>`;
-  else if (Sync.url && Sync.err && Sync.outbox.length) h = `<div class="banner warn">You are offline or the sheet can't be reached. ${Sync.outbox.length} change${Sync.outbox.length === 1 ? ' is' : 's are'} saved on this phone and will go to Google Sheets when the connection is back.</div>`;
+  else if (signedIn() && Sync.err && Sync.outbox.length) h = `<div class="banner warn">You are offline or the sheet can't be reached. ${Sync.outbox.length} change${Sync.outbox.length === 1 ? ' is' : 's are'} saved on this phone and will go to Google Sheets when the connection is back.</div>`;
   b.innerHTML = h; b.hidden = !h;
 }
 
@@ -965,9 +988,7 @@ function renderSetup(X) {
       <div class="ed" id="cardEd"><div class="edrow card-row edhead"><span>Card name</span><span>Statement day</span><span>Pay-by day</span><span>Credit limit ₹</span><span>Last bill unpaid ₹</span><span>Spent since ₹</span><span>As of</span><span></span></div>${cardRows || '<p class="muted" style="margin:12px 0">No cards yet. Add one below.</p>'}</div>
       <p class="hint" style="margin:0;padding:0 16px 4px">Statement day is the "Statement date" printed on your bill. Pay-by day is the "Payment due date". Fill the three boxes on the right only for money you already owed on the "As of" date that you will not enter as entries.</p>
       <div class="row-actions"><button class="btn sm" type="button" data-act="add-cardrow">+ Add card</button></div></section>
-    <section class="card"><div class="sec-h"><h2>Google Sheets</h2><span class="hint">${esc(syncLabel())}</span></div>
-      <div class="ed" style="padding-top:12px"><p class="muted" style="margin:0;font-size:13px;overflow-wrap:anywhere">Connected to <b>${esc(Sync.url.replace(/^https:\/\/script\.google\.com\/macros\/s\/(.{6}).*(.{6})\/exec$/, 'script …$1…$2'))}</b>. Every phone that connects with the same link and key sees and adds to the same data.</p></div>
-      <div class="row-actions"><button class="btn" type="button" data-act="sync-now">Sync now</button><button class="btn danger" type="button" data-act="disconnect">Disconnect this phone</button></div></section>
+    ${accountHtml()}
     <section class="card"><div class="sec-h"><h2>Backup</h2><span class="hint">Your data lives in Google Sheets. A backup file is a spare copy.</span></div>
       <div class="row-actions">
         <button class="btn" type="button" data-act="export-json">Export backup</button>
@@ -1199,9 +1220,9 @@ function render() {
     VIEWS.forEach(n => { $('#v-' + n).hidden = true; });
     const known = state.got.config;
     gate.hidden = false;
-    if (!Sync.url) { renderConnect(gate); return; }
+    if (!signedIn()) { renderSignIn(gate); return; }
     gate.innerHTML = Sync.err && !known
-      ? `<h2>Can't reach Google Sheets</h2><p>${esc(state.connErr || 'Check the internet connection, then try again.')}</p><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" type="button" data-act="sync-now">Try again</button><button class="btn" type="button" data-act="disconnect">Change link or key</button></div>`
+      ? `<h2>Can't reach Google Sheets</h2><p>${esc(state.connErr || 'Check the internet connection, then try again.')}</p><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" type="button" data-act="sync-now">Try again</button><button class="btn" type="button" data-act="disconnect">Sign out</button></div>`
       : !known
       ? `<h2>Opening your tracker</h2><p>Your budget, entries and balances will appear here in a moment.</p>`
       : `<h2>Your tracker is empty</h2><p>Start with a ready set of household categories, then set your budgets and accounts in Setup. Or restore a backup you exported earlier.</p>
@@ -1446,47 +1467,109 @@ document.addEventListener('toggle', ev => { const d = ev.target; if (d && d.matc
 window.addEventListener('hashchange', () => setView(location.hash.slice(1)));
 let rz; window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if (state.config) setView(state.view); }, 200); });
 
-/* ---------- connect ---------- */
-function renderConnect(gate) {
-  const c = readConn() || {};
-  gate.innerHTML = `<h2>Connect to your Google Sheet</h2>
-    <p>Your entries are stored in a Google Sheet, so every phone you connect sees and adds to the same data. Do this once on each phone.</p>
-    <ol class="steps"><li>Paste your <b>phone link</b> (the long one with <b>#connect=</b>) in the first box and tap Connect. The key box can stay empty.</li><li>Or paste the <b>Web app URL</b> (ends in <b>/exec</b>) and type the <b>access key</b>.</li></ol>
-    <form class="connect" id="connForm" novalidate>
-      <label class="field"><span>Phone link or Web app URL</span><input id="cUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(c.url || '')}"></label>
-      <label class="field"><span>Access key</span><input id="cKey" type="password" autocomplete="current-password" spellcheck="false" value="${esc(c.key || '')}"></label>
+/* ---------- sign-in ---------- */
+let gisReady = null;
+function loadGis() {
+  if (gisReady) return gisReady;
+  gisReady = new Promise((ok, bad) => {
+    const sc = document.createElement('script'); sc.src = 'https://accounts.google.com/gsi/client'; sc.async = true;
+    sc.onload = () => { try { google.accounts.id.initialize({client_id: GOOGLE_CLIENT_ID, callback: onGoogleCredential, auto_select: true, cancel_on_tap_outside: false, use_fedcm_for_prompt: true, itp_support: true}); ok(); } catch (e) { bad(e); } };
+    sc.onerror = () => { gisReady = null; bad(new Error('gis')); };
+    document.head.appendChild(sc);
+  });
+  return gisReady;
+}
+function signInMsg(code, email) {
+  if (code === 'not_allowed') return `${email ? esc(email) : 'This Google account'} isn't on the family list yet. Ask the owner to add it in Setup → Family access.`;
+  if (code === 'no_client_id') return 'Google sign-in is not switched on in the sheet yet (Config tab: google client id).';
+  if (code === 'bad_token') return 'Google sign-in could not be checked. Try again.';
+  return "Couldn't reach the sheet. Check the internet connection, then try again.";
+}
+function renderSignIn(gate) {
+  const msg = state.connErr ? `<div class="banner warn">${esc(state.connErr)}</div>` : '';
+  if (GOOGLE_CLIENT_ID) {
+    gate.innerHTML = `<h2>Sign in</h2>${msg}
+      <p>Use the Google account the family owner has added. You sign in once on each phone; it stays signed in.</p>
+      <div id="gBtn" style="min-height:44px"></div>
+      <div class="err" id="gErr" hidden></div>
+      <details style="margin-top:6px"><summary class="hint" style="cursor:pointer">Have a set-up link instead?</summary>${linkForm()}</details>`;
+    loadGis().then(() => {
+      const el = $('#gBtn'); if (!el) return;
+      google.accounts.id.renderButton(el, {type: 'standard', theme: 'filled_blue', size: 'large', shape: 'pill', text: 'continue_with', logo_alignment: 'left', width: Math.min(320, el.clientWidth || 320)});
+      google.accounts.id.prompt();
+    }).catch(() => { const e = $('#gErr'); if (e) { e.textContent = "Google sign-in didn't load. Check the connection and reload."; e.hidden = false; } });
+  } else {
+    gate.innerHTML = `<h2>Connect this phone</h2>${msg}<p>Paste your set-up link and tap Connect. You do this once on each phone.</p>${linkForm()}`;
+  }
+}
+function linkForm() {
+  return `<form class="connect" id="connForm" novalidate>
+      <label class="field"><span>Set-up link or access key</span><input id="cLink" type="text" autocomplete="off" spellcheck="false" placeholder="https://arhaanbeta.github.io/budget-tracker/#connect=…"></label>
       <div class="err" id="cErr" hidden></div>
       <div><button class="btn primary" type="submit" id="cGo">Connect</button></div>
-    </form>
-    <p class="hint">The link and key stay on this phone only. They are never stored in the app's code.</p>`;
+    </form>`;
+}
+async function finishSignIn(j, extra) {
+  Object.assign(Sync, extra); Sync.url = Sync.url || API_URL; Sync.err = ''; Sync.last = Date.now();
+  state.got.config = true; state.connErr = ''; state.mode = 'cloud';
+  takeReply(j); Sync.outbox.forEach(applyLocal); saveCache();
+  toast(Sync.me && Sync.me.email ? 'Signed in as ' + Sync.me.email : 'Connected'); render();
+  if (Sync.outbox.length) flush();
+}
+async function onGoogleCredential(resp) {
+  const err = $('#gErr');
+  if (err) { err.hidden = true; }
+  const gate = $('#gate'); if (gate) gate.setAttribute('aria-busy', 'true');
+  try {
+    const j = await call([], {idToken: resp.credential, session: undefined, key: undefined});
+    await finishSignIn(j, {session: j.session, key: ''});
+  } catch (e) {
+    let email = ''; try { email = JSON.parse(atob(resp.credential.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).email; } catch (x) {}
+    const el = $('#gErr'); if (el) { el.innerHTML = signInMsg(e && e.code, email); el.hidden = false; }
+  } finally { if (gate) gate.removeAttribute('aria-busy'); }
 }
 async function connect(ev) {
   ev.preventDefault();
-  let url = $('#cUrl').value.trim(), key = $('#cKey').value.trim();
+  let raw = $('#cLink').value.trim(), url = API_URL, key = raw;
   const err = $('#cErr'), go = $('#cGo');
   err.hidden = true;
-  // Accept the whole one-tap phone link pasted into the URL box.
-  const lm = url.match(/#connect=([A-Za-z0-9_\-+/=]+)/);
-  if (lm) { try { const j = JSON.parse(atob(lm[1].replace(/-/g, '+').replace(/_/g, '/'))); url = j.url || ''; key = j.key || ''; } catch (e) {} }
-  if (!/^https:\/\/script\.google(usercontent)?\.com\/.+/.test(url)) { err.textContent = 'Paste the phone link, or the Web app URL from Apps Script (it starts with https://script.google.com/)'; err.hidden = false; return; }
-  if (!key) { err.textContent = 'Paste the whole phone link, or type the access key.'; err.hidden = false; return; }
+  const lm = raw.match(/#connect=([A-Za-z0-9_\-+/=]+)/);
+  if (lm) { try { const j = JSON.parse(atob(lm[1].replace(/-/g, '+').replace(/_/g, '/'))); url = j.url || API_URL; key = j.key || ''; } catch (e) {} }
+  if (!key) { err.textContent = 'Paste the whole set-up link.'; err.hidden = false; return; }
   go.disabled = true; go.textContent = 'Connecting…';
-  try {
-    const j = await call([], url, key);
-    try { localStorage.setItem(LS_CONN, JSON.stringify({url, key})); } catch (e) {}
-    Sync.url = url; Sync.key = key; Sync.err = ''; Sync.last = Date.now(); state.got.config = true; state.connErr = '';
-    fromServer(j.data); Sync.outbox.forEach(applyLocal); saveCache(); state.mode = 'cloud';
-    toast('Connected to Google Sheets'); render(); if (Sync.outbox.length) flush();
-  } catch (e) { err.textContent = writeErr(e); err.hidden = false; go.disabled = false; go.textContent = 'Connect'; }
+  try { const j = await call([], {url, key, session: undefined}); await finishSignIn(j, {url, key, session: ''}); }
+  catch (e) { err.textContent = e && e.code === 'bad_key' ? 'That link has been switched off. Sign in with Google instead.' : signInMsg(e && e.code); err.hidden = false; go.disabled = false; go.textContent = 'Connect'; }
 }
-document.addEventListener('submit', ev => { if (ev.target && ev.target.id === 'connForm') connect(ev); });
+function accountHtml() {
+  const me = Sync.me || {}, owner = me.role === 'Owner';
+  const who = me.email ? `Signed in as <b>${esc(me.name || me.email)}</b>${me.name ? ' · ' + esc(me.email) : ''}` : 'Connected with a set-up link';
+  const users = owner && Array.isArray(Sync.users) ? Sync.users : null;
+  const list = users ? users.map(u => `<div class="li"><div class="l"><div class="t1">${esc(u.name || u.email)}</div><div class="t2">${esc(u.email)} · ${esc(u.role)}</div></div>
+      ${u.email === me.email ? '<span class="hint">You</span>' : `<button class="icon-btn" type="button" data-act="del-user" data-email="${esc(u.email)}" aria-label="Remove ${esc(u.email)}">×</button>`}</div>`).join('') : '';
+  return `<section class="card"><div class="sec-h"><h2>Account and sync</h2><span class="hint">${esc(syncLabel())}</span></div>
+      <div class="ed" style="padding-top:12px"><p class="muted" style="margin:0;font-size:13px;overflow-wrap:anywhere">${who}. Your data is in the <b>Budget Tracker data</b> Google Sheet.</p></div>
+      <div class="row-actions"><button class="btn" type="button" data-act="sync-now">Sync now</button><button class="btn danger" type="button" data-act="disconnect">Sign out of this phone</button></div></section>
+    ${users ? `<section class="card list"><div class="sec-h"><h2>Family access</h2><span class="hint">Only these Google accounts can sign in</span></div>${list}
+      <form class="row-actions addcard" id="addUserForm" novalidate><input id="newUser" type="email" autocomplete="off" placeholder="name@gmail.com" aria-label="Google account email to add"><button class="btn primary" type="submit">Add person</button></form></section>` : ''}`;
+}
+document.addEventListener('submit', ev => {
+  if (ev.target && ev.target.id === 'connForm') connect(ev);
+  else if (ev.target && ev.target.id === 'addUserForm') {
+    ev.preventDefault(); const email = $('#newUser').value.trim().toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { toast('Type a full email address', 'bad'); return; }
+    Sync.outbox.push({t: 'adduser', email}); saveCache(); toast('Adding ' + email + '…'); flush();
+  }
+});
 document.addEventListener('click', ev => {
   const b = ev.target.closest('[data-act]'); if (!b) return;
   if (b.dataset.act === 'sync-now') { Sync.err = ''; render(); flush(); }
+  else if (b.dataset.act === 'del-user') { if (!arm(b, 'du' + b.dataset.email, '✓')) return; Sync.outbox.push({t: 'deluser', email: b.dataset.email}); saveCache(); flush(); }
   else if (b.dataset.act === 'disconnect') {
     if (Sync.outbox.length && !arm(b, 'disc', Sync.outbox.length + ' unsynced, tap again')) return;
+    if (Sync.session) call([{t: 'signout'}]).catch(() => {});
+    try { if (window.google && google.accounts) google.accounts.id.disableAutoSelect(); } catch (e) {}
     try { localStorage.removeItem(LS_CONN); localStorage.removeItem(LS_CACHE); localStorage.removeItem(LS_OUT); } catch (e) {}
-    Sync.url = ''; Sync.key = ''; Sync.outbox = []; Sync.last = 0;
+    Sync.key = ''; Sync.session = ''; Sync.me = null; Sync.users = null; Sync.outbox = []; Sync.last = 0;
     state.config = null; state.cycles = {}; state.balances = {}; state.cardfix = {}; state.got.config = false; state.dirty = false; state.draft = null;
     render();
   }
@@ -1498,19 +1581,20 @@ function start() {
   const m = location.hash.match(/^#connect=([A-Za-z0-9_\-+/=]+)$/);
   if (m) {
     try { const j = JSON.parse(atob(m[1].replace(/-/g, '+').replace(/_/g, '/')));
-      if (j && /^https:\/\/script\.google\.com\//.test(j.url) && j.key) localStorage.setItem(LS_CONN, JSON.stringify({url: j.url, key: j.key})); } catch (e) {}
+      if (j && /^https:\/\/script\.google\.com\//.test(j.url) && j.key && !(readConn() || {}).session) localStorage.setItem(LS_CONN, JSON.stringify({url: j.url, key: j.key})); } catch (e) {}
     history.replaceState(null, '', location.pathname + '#overview');
   }
   state.view = VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'overview';
-  const c = readConn();
-  if (c && c.url && c.key) { Sync.url = c.url; Sync.key = c.key; state.mode = 'cloud'; loadCache(); }
+  const c = readConn() || {};
+  Sync.url = c.url || API_URL; Sync.key = c.key || ''; Sync.session = c.session || ''; Sync.me = c.me || null;
+  if (signedIn()) { state.mode = 'cloud'; loadCache(); }
   render();
-  if (Sync.url) flush();
+  if (signedIn()) flush();
   // Pick up entries made on other phones.
-  setInterval(() => { if (Sync.url && document.visibilityState === 'visible' && !state.dirty) flush(); }, 30000);
-  document.addEventListener('visibilitychange', () => { if (Sync.url && document.visibilityState === 'visible') flush(); });
-  window.addEventListener('online', () => { if (Sync.url) flush(); });
-  setInterval(() => { if (Sync.url) renderChrome(state.config ? ctx() : null); }, 60000);
+  setInterval(() => { if (signedIn() && document.visibilityState === 'visible' && !state.dirty) flush(); }, 30000);
+  document.addEventListener('visibilitychange', () => { if (signedIn() && document.visibilityState === 'visible') flush(); });
+  window.addEventListener('online', () => { if (signedIn()) flush(); });
+  setInterval(() => { if (signedIn()) renderChrome(state.config ? ctx() : null); }, 60000);
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 start();

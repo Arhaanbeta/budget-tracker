@@ -2,10 +2,14 @@
  * Budget Tracker: Google Sheets back end.
  *
  * Paste this whole file into Extensions > Apps Script of the
- * "Budget Tracker data" spreadsheet, set the APP_KEY script property,
- * and deploy as a Web app (Execute as: Me, Who has access: Anyone).
+ * "Budget Tracker data" spreadsheet and deploy it as a Web app
+ * (Execute as: Me, Who has access: Anyone).
  *
- * The app sends one POST per sync: {key, ops: [...]}. Each op is an
+ * Sign-in: the app sends a Google ID token once. The script checks it with Google,
+ * checks the email is on the Users tab, and hands back a session that the phone
+ * keeps for good. Removing someone from the Users tab locks them out at once.
+ *
+ * The app sends one POST per sync: {session, ops: [...]}. Each op is an
  * upsert or a delete, so sending the same op twice is harmless.
  * The reply is always the full, current data set.
  */
@@ -15,55 +19,43 @@ var TABS = {
             'Category ID', 'Account ID', 'Card ID', 'Created at', 'Saved at'],
   Balances: ['Date', 'Account ID', 'Account', 'Balance'],
   CardFix: ['Card ID', 'Card', 'Statement date', 'Your figure'],
-  Config: ['Key', 'Value', 'Note']
+  Config: ['Key', 'Value', 'Note'],
+  Users: ['Email', 'Name', 'Role', 'Added by', 'Added at']
 };
 var E = {id: 0, date: 1, cycle: 2, type: 3, catName: 4, amount: 5, acctName: 6, cardName: 7, note: 8, member: 9, tag: 10,
          refund: 11, cat: 12, acct: 13, card: 14, at: 15, saved: 16};
 var CHUNK = 40000; // characters per Config cell
 
-var APP_URL = 'https://arhaanbeta.github.io/budget-tracker/';
-
-/* The first time the owner opens the Web app URL, the script makes its own access key and
-   shows a one-tap link that connects a phone. After that it never shows the key again. */
 function doGet() {
-  var props = PropertiesService.getScriptProperties(), lock = LockService.getScriptLock(), key, fresh = false;
-  lock.waitLock(20000);
-  try {
-    key = props.getProperty('APP_KEY');
-    if (!key) {
-      key = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '').slice(0, 40);
-      props.setProperty('APP_KEY', key); fresh = true;
-    }
-  } finally { lock.releaseLock(); }
-  var page = '<meta name="viewport" content="width=device-width,initial-scale=1"><div style="font:16px/1.5 Arial,sans-serif;max-width:560px;margin:24px auto;padding:0 16px">';
-  if (fresh) {
-    var link = APP_URL + '#connect=' + Utilities.base64EncodeWebSafe(JSON.stringify({url: ScriptApp.getService().getUrl(), key: key}));
-    page += '<h2>Budget Tracker is connected to this sheet</h2>' +
-      '<p><b>Open this link on each phone</b> (send it to yourself on WhatsApp or email). It connects the app in one tap.</p>' +
-      '<p><a target="_blank" style="word-break:break-all" href="' + link + '">' + link + '</a></p>' +
-      '<p>Save this link somewhere private, like a note. This page shows it only once. Anyone with the link can see and change your budget.</p>' +
-      '<p style="color:#666;font-size:13px">Lost it? In Apps Script open Project Settings, delete the APP_KEY script property, then open this page again for a new link. Old links stop working.</p>';
-  } else {
-    page += '<h2>Budget Tracker back end is running</h2><p>The phone link was already shown once. To make a new one, delete the APP_KEY script property in Apps Script → Project Settings, then open this page again.</p>';
-  }
-  return HtmlService.createHtmlOutput(page + '</div>').setTitle('Budget Tracker set-up');
+  return HtmlService.createHtmlOutput('<meta name="viewport" content="width=device-width,initial-scale=1">' +
+    '<div style="font:16px/1.5 Arial,sans-serif;max-width:560px;margin:24px auto;padding:0 16px">' +
+    '<h2>Budget Tracker back end is running</h2><p>Open the app and tap <b>Sign in with Google</b>.</p></div>')
+    .setTitle('Budget Tracker');
 }
 
 function doPost(e) {
   var req;
   try { req = JSON.parse(e.postData.contents); } catch (x) { return out({ok: false, error: 'bad_json'}); }
-  var key = PropertiesService.getScriptProperties().getProperty('APP_KEY');
-  if (!key) return out({ok: false, error: 'no_key_set'});
-  if (!req || req.key !== key) return out({ok: false, error: 'bad_key'});
+  if (!req) return out({ok: false, error: 'bad_json'});
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(25000)) return out({ok: false, error: 'busy'});
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     ensureTabs(ss);
+    var who = authorise(ss, req);
+    if (!who.ok) return out(who);
     var ops = Array.isArray(req.ops) ? req.ops : [];
-    for (var i = 0; i < ops.length; i++) applyOp(ss, ops[i]);
+    for (var i = 0; i < ops.length; i++) {
+      var op = ops[i] || {};
+      if (op.t === 'signout') { if (req.session) PropertiesService.getScriptProperties().deleteProperty('sess:' + req.session); return out({ok: true, signedOut: true}); }
+      if (op.t === 'adduser' || op.t === 'deluser') { userOp(ss, op, who.user); continue; }
+      applyOp(ss, op);
+    }
     if (ops.length) SpreadsheetApp.flush();
-    return out({ok: true, applied: ops.length, data: readAll(ss), at: Date.now()});
+    var reply = {ok: true, applied: ops.length, data: readAll(ss), me: who.user, at: Date.now()};
+    if (who.session) reply.session = who.session;
+    if (who.user.role === 'Owner') reply.users = listUsers(ss);
+    return out(reply);
   } catch (err) {
     return out({ok: false, error: String(err && err.message || err)});
   } finally {
@@ -73,6 +65,73 @@ function doPost(e) {
 
 function out(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+/* ---------- sign-in ---------- */
+function authorise(ss, req) {
+  var props = PropertiesService.getScriptProperties();
+  if (req.idToken) {
+    var g = verifyGoogle(ss, req.idToken);
+    if (!g.ok) return g;
+    var tok = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '');
+    props.setProperty('sess:' + tok, JSON.stringify({email: g.user.email, at: Date.now()}));
+    return {ok: true, user: g.user, session: tok};
+  }
+  if (req.session) {
+    var raw = props.getProperty('sess:' + req.session);
+    if (!raw) return {ok: false, error: 'signed_out'};
+    var u = findUser(ss, JSON.parse(raw).email);
+    if (!u) { props.deleteProperty('sess:' + req.session); return {ok: false, error: 'not_allowed'}; }
+    return {ok: true, user: u};
+  }
+  // Older set-up links. Delete the APP_KEY script property to switch these off.
+  var key = props.getProperty('APP_KEY');
+  if (key && req.key && req.key === key) return {ok: true, user: {email: '', name: 'Set-up link', role: 'Owner'}};
+  return {ok: false, error: req.key ? 'bad_key' : 'signed_out'};
+}
+function verifyGoogle(ss, idToken) {
+  var cid = configValue(ss, 'google client id');
+  if (!cid) return {ok: false, error: 'no_client_id'};
+  var r = UrlFetchApp.fetch('https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(idToken), {muteHttpExceptions: true});
+  if (r.getResponseCode() !== 200) return {ok: false, error: 'bad_token'};
+  var p = JSON.parse(r.getContentText());
+  var issuerOk = p.iss === 'accounts.google.com' || p.iss === 'https://accounts.google.com';
+  if (p.aud !== cid || !issuerOk || String(p.email_verified) !== 'true' || +p.exp * 1000 < Date.now()) return {ok: false, error: 'bad_token'};
+  var u = findUser(ss, p.email);
+  if (!u) return {ok: false, error: 'not_allowed', email: p.email};
+  if (!u.name && p.name) { ss.getSheetByName('Users').getRange(u.row, 2).setValue(p.name); u.name = p.name; }
+  return {ok: true, user: u};
+}
+function configValue(ss, name) {
+  var r = rows(ss.getSheetByName('Config'));
+  for (var i = 0; i < r.length; i++) if (String(r[i][0]).trim().toLowerCase() === name) return String(r[i][1]).trim();
+  return '';
+}
+function listUsers(ss) {
+  return rows(ss.getSheetByName('Users')).map(function (row, i) {
+    return {email: String(row[0]).trim().toLowerCase(), name: txt(row[1]), role: /^owner$/i.test(String(row[2]).trim()) ? 'Owner' : 'Member', row: i + 2};
+  }).filter(function (u) { return /@/.test(u.email); });
+}
+function findUser(ss, email) {
+  email = String(email || '').trim().toLowerCase();
+  var all = listUsers(ss);
+  for (var i = 0; i < all.length; i++) if (all[i].email === email) return all[i];
+  return null;
+}
+function userOp(ss, op, me) {
+  if (!me || me.role !== 'Owner') return;
+  var sh = ss.getSheetByName('Users'), email = String(op.email || '').trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return;
+  var u = findUser(ss, email);
+  if (op.t === 'adduser') {
+    if (u) return;
+    sh.getRange(sh.getLastRow() + 1, 1, 1, 5).setNumberFormat('@')
+      .setValues([[email, txt(op.name), op.role === 'Owner' ? 'Owner' : 'Member', me.email || 'Set-up link', stamp()]]);
+  } else if (u) {
+    var owners = listUsers(ss).filter(function (x) { return x.role === 'Owner'; });
+    if (u.role === 'Owner' && owners.length < 2) return; // never remove the last owner
+    sh.deleteRow(u.row);
+  }
 }
 
 /* ---------- sheet helpers ---------- */
@@ -286,6 +345,6 @@ function selfTest() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   ensureTabs(ss);
   var d = readAll(ss);
-  Logger.log('Key set: ' + !!PropertiesService.getScriptProperties().getProperty('APP_KEY'));
+  Logger.log('Google client ID set: ' + !!configValue(ss, 'google client id') + ', users: ' + listUsers(ss).length);
   Logger.log('Config found: ' + !!d.config + ', entries: ' + d.txns.length + ', balance dates: ' + Object.keys(d.balances).length);
 }
