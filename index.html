@@ -305,6 +305,25 @@ img{max-width:100%}
 .steps{margin:0;padding-left:20px;color:var(--ink-2);font-size:14px;display:flex;flex-direction:column;gap:4px}
 .status.sync::before{background:var(--accent)}
 .status.bad::before{background:var(--bad)}
+body[data-view="vault"] .fab,body[data-view="vault"] #addTop,body[data-view="vault"] #cycBar{display:none!important}
+/* Vault */
+.vbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.vbar input{flex:1 1 200px;border:1px solid var(--rule-2);background:var(--sheet);border-radius:8px;padding:7px 10px;min-height:38px;min-width:0}
+.vrow{border-top:1px solid var(--rule)}
+.vrow:first-child{border-top:0}
+.vhead{display:flex;justify-content:space-between;align-items:baseline;gap:12px;width:100%;text-align:left;background:none;border:0;padding:12px 16px;cursor:pointer}
+.vhead:hover{background:var(--accent-soft)}
+.vhead .t1{font-weight:600}.vhead .t2{font-size:12px;color:var(--ink-3)}
+.vbody{padding:0 16px 12px;display:flex;flex-direction:column;gap:2px}
+.vf{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 10px;align-items:center;padding:7px 0;border-top:1px dashed var(--rule)}
+.vf .k{font-size:12px;color:var(--ink-3);font-weight:600;grid-column:1/-1}
+.vf .v{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:15px;overflow-wrap:anywhere;min-width:0}
+.vf .v.masked{letter-spacing:.15em;color:var(--ink-3)}
+.vf .a{display:flex;gap:6px}
+.vacts{display:flex;gap:8px;flex-wrap:wrap;padding-top:10px}
+.lockcard{display:flex;flex-direction:column;gap:12px;padding:18px 16px;max-width:560px}
+.lockcard .field input{font-size:16px}
+.warnbox{background:var(--warn-soft);border-radius:8px;padding:10px 12px;font-size:13px;color:var(--ink)}
 </style>
 </head>
 <body>
@@ -329,6 +348,7 @@ img{max-width:100%}
       <a href="#cards" data-v="cards">Cards</a>
       <a href="#wealth" data-v="wealth">Wealth</a>
       <a href="#trend" data-v="trend">Trend</a>
+      <a href="#vault" data-v="vault" id="vaultTab" hidden>Vault</a>
       <a href="#setup" data-v="setup">Setup</a>
     </nav>
   </div>
@@ -358,6 +378,7 @@ img{max-width:100%}
   <section class="view" id="v-wealth" hidden></section>
   <section class="view" id="v-trend" hidden></section>
   <section class="view" id="v-setup" hidden></section>
+  <section class="view" id="v-vault" hidden></section>
 </main>
 
 <button class="fab" data-act="add" type="button" aria-label="Add entry">+</button>
@@ -429,6 +450,11 @@ img{max-width:100%}
   </div>
 </div>
 
+<!-- Vault row editor -->
+<div class="scrim" id="vaultScrim" hidden>
+  <form class="sheet" id="vaultForm" novalidate autocomplete="off"></form>
+</div>
+
 <!-- Copy sheet (fallback when downloads are unavailable) -->
 <div class="scrim" id="copyScrim" hidden>
   <div class="sheet">
@@ -442,7 +468,7 @@ img{max-width:100%}
 <script>
 (() => {
 'use strict';
-const VIEWS = ['overview','entries','cards','wealth','trend','setup'];
+const VIEWS = ['overview','entries','cards','wealth','trend','setup','vault'];
 const TYPES = ['Expense','Income','Transfer'];
 const GROUPS = ['Fixed','Variable','Discretionary','Sinking'];
 const CLASSES = ['Bank','FD','Bond','Retirement','Equity','ETF','Gold','Cash','Property','Loan','Owed','Other'];
@@ -608,6 +634,7 @@ function takeReply(j) {
 // Drop this phone's sign-in but keep any unsynced changes, so they go up after the next sign-in.
 function forgetSignIn(reason) {
   Sync.session = ''; Sync.key = ''; Sync.me = null; Sync.users = null; Sync.err = '';
+  lockVault(); V.loaded = false; V.meta = null; V.enc = {};
   state.connErr = reason === 'not_allowed' ? 'This Google account is no longer on the family list.' : reason === 'bad_key' ? 'That set-up link has been switched off. Sign in with Google.' : '';
   // Hide the saved copy of the family's data until someone signs in again.
   state.config = null; state.cycles = {}; state.balances = {}; state.cardfix = {}; state.got.config = false; state.dirty = false; state.draft = null;
@@ -1212,9 +1239,11 @@ function updCardHint() {
 /* ---------- views ---------- */
 function setView(v) {
   state.view = VIEWS.includes(v) ? v : 'overview';
+  document.body.dataset.view = state.view;
   VIEWS.forEach(n => { $('#v-' + n).hidden = !state.config || n !== state.view; });
   document.querySelectorAll('.tabs a').forEach(a => a.setAttribute('aria-current', a.dataset.v === state.view ? 'page' : 'false'));
   if (state.config && (state.view === 'trend' || state.view === 'wealth')) { const X = ctx(); state.view === 'trend' ? renderTrend(X) : renderWealth(X); }
+  if (state.config && state.view === 'vault') renderVault();
 }
 function render() {
   const X = state.config ? ctx() : null;
@@ -1235,6 +1264,9 @@ function render() {
     return;
   }
   gate.hidden = true;
+  const isOwner = !!(Sync.me && Sync.me.role === 'Owner');
+  $('#vaultTab').hidden = !isOwner;
+  if (!isOwner && state.view === 'vault') state.view = 'overview';
   renderOverview(X); renderEntries(X); renderCards(X); renderWealth(X); renderTrend(X);
   if (!state.dirty) { state.draft = clone(state.config); renderSetup(X); }
   fillDatalists(X);
@@ -1431,8 +1463,8 @@ $('#eDel').addEventListener('click', async () => {
   try { await API.delTxn(editing.id, editing._doc); toast('Entry deleted'); closeEntry(); } catch (e) { $('#eErr').textContent = writeErr(e); $('#eErr').hidden = false; }
 });
 $('#balForm').addEventListener('submit', ev => { ev.preventDefault(); saveBalances(); });
-['entryScrim', 'balScrim', 'impScrim', 'copyScrim'].forEach(id => $('#' + id).addEventListener('click', ev => { if (ev.target.id === id) { $('#' + id).hidden = true; if (id === 'entryScrim') editing = null; } }));
-document.addEventListener('keydown', ev => { if (ev.key === 'Escape') ['entryScrim', 'balScrim', 'impScrim', 'copyScrim'].forEach(id => { $('#' + id).hidden = true; }); });
+['entryScrim', 'balScrim', 'impScrim', 'copyScrim', 'vaultScrim'].forEach(id => $('#' + id).addEventListener('click', ev => { if (ev.target.id === id) { $('#' + id).hidden = true; if (id === 'entryScrim') editing = null; } }));
+document.addEventListener('keydown', ev => { if (ev.key === 'Escape') ['entryScrim', 'balScrim', 'impScrim', 'copyScrim', 'vaultScrim'].forEach(id => { $('#' + id).hidden = true; }); });
 $('#cycPick').addEventListener('change', ev => { state.cur = ev.target.value; state.curPinned = state.cur !== cycleKeyOf(todayStr()); render(); });
 ['fCat', 'fType'].forEach(id => $('#' + id).addEventListener('change', () => renderEntries(ctx())));
 $('#fQ').addEventListener('input', () => renderEntries(ctx()));
@@ -1474,6 +1506,280 @@ window.addEventListener('hashchange', () => {
   setView(location.hash.slice(1));
 });
 let rz; window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if (state.config) setView(state.view); }, 200); });
+
+/* ---------- vault ----------
+   Zero-knowledge: everything is encrypted here, on the phone, before it is sent.
+   Key: PBKDF2-SHA256 (600,000 rounds) from the master passphrase. Cipher: AES-256-GCM with a fresh
+   12-byte IV per save, and the row ID bound in as associated data so rows can't be swapped.
+   The key is non-extractable and lives only in memory; nothing readable is ever stored on the phone. */
+const VAULT_TABLES = [
+  {k: 'cards', title: 'Credit cards', one: 'card', show: [0, 1],
+   cols: ['Card', 'Bank', 'Card number', 'Name on card', 'Valid thru (MM/YY)', 'CVV', 'Card PIN', 'Login / user ID', 'Password', 'Notes']},
+  {k: 'banks', title: 'Bank accounts', one: 'account', show: [0, 1],
+   cols: ['Account', 'Bank', 'Account holder', 'Account number', 'IFSC', 'Customer ID', 'Net-banking user ID', 'Password', 'MPIN / UPI PIN', 'Notes']},
+  {k: 'personal', title: 'Personal information', one: 'item', show: [0, 2],
+   cols: ['Item', 'Detail', 'Notes']}
+];
+const VAULT_ROUNDS = 600000, VAULT_IDLE_MS = 120000, CLIP_MS = 30000;
+const V = {epoch: 0, loaded: false, loading: false, err: '', meta: null, enc: {}, key: null, rows: [], schema: null, open: {}, shown: {}, q: '', last: Date.now(), busy: false};
+const te = new TextEncoder(), td = new TextDecoder();
+const b64e = u8 => { let x = ''; for (let i = 0; i < u8.length; i++) x += String.fromCharCode(u8[i]); return btoa(x); };
+const b64d = str => Uint8Array.from(atob(str), ch => ch.charCodeAt(0));
+async function vDerive(pass, salt, rounds) {
+  const base = await crypto.subtle.importKey('raw', te.encode(pass.normalize('NFKC')), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({name: 'PBKDF2', hash: 'SHA-256', salt, iterations: rounds}, base, {name: 'AES-GCM', length: 256}, false, ['encrypt', 'decrypt']);
+}
+async function vSeal(key, id, obj) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({name: 'AES-GCM', iv, additionalData: te.encode(id)}, key, te.encode(JSON.stringify(obj))));
+  return 'v1.' + b64e(iv) + '.' + b64e(ct);
+}
+async function vOpen(key, id, sealed) {
+  const [v, iv, ct] = String(sealed).split('.');
+  if (v !== 'v1') throw new Error('format');
+  return JSON.parse(td.decode(await crypto.subtle.decrypt({name: 'AES-GCM', iv: b64d(iv), additionalData: te.encode(id)}, key, b64d(ct))));
+}
+const vId = () => 'r' + Array.from(crypto.getRandomValues(new Uint8Array(9)), b => b.toString(16).padStart(2, '0')).join('');
+function vCols(k) { const t = VAULT_TABLES.find(x => x.k === k); const named = V.schema && V.schema[k]; return t.cols.map((c, i) => (named && named[i]) || c); }
+async function vCall(ops) {
+  const j = await call(ops, {vault: true});
+  if (!Array.isArray(j.vault)) throw {code: 'old_script'};
+  V.enc = {}; V.meta = null;
+  j.vault.forEach(r => { if (r.id === '_meta') { try { V.meta = JSON.parse(atob(r.data.slice(5))); } catch (e) {} } else V.enc[r.id] = r.data; });
+  return j;
+}
+async function vDecryptAll() {
+  V.schema = null; V.rows = [];
+  if (V.enc._schema) { try { V.schema = (await vOpen(V.key, '_schema', V.enc._schema)).cols || null; } catch (e) {} }
+  for (const [id, data] of Object.entries(V.enc)) {
+    if (id === '_schema') continue;
+    try { const r = await vOpen(V.key, id, data); V.rows.push({id, t: r.t, c: Array.isArray(r.c) ? r.c : [], at: r.at || 0}); }
+    catch (e) { V.rows.push({id, t: 'broken', c: [], at: 0}); }
+  }
+}
+async function loadVault() {
+  V.loading = true; V.err = ''; renderVault();
+  try { await vCall([]); V.loaded = true; if (V.key) await vDecryptAll(); }
+  catch (e) { V.err = e && e.code === 'old_script' ? 'old_script' : 'net'; }
+  V.loading = false; renderVault();
+}
+function lockVault(why) {
+  V.epoch++; // any unlock or save still in flight is abandoned
+  V.key = null; V.rows = []; V.schema = null; V.shown = {}; V.open = {}; V.q = '';
+  $('#vaultScrim').hidden = true; $('#vaultForm').innerHTML = '';
+  if ($('#v-vault').innerHTML) renderVault();
+  if (why) toast(why);
+}
+function renderVault() {
+  const el = $('#v-vault');
+  if (!(Sync.me && Sync.me.role === 'Owner')) { el.innerHTML = '<div class="card empty">Only the owner can open the vault.</div>'; return; }
+  if (!V.loaded && !V.loading && !V.err) { loadVault(); return; }
+  if (V.loading) { el.innerHTML = '<div class="card empty">Opening the vault…</div>'; return; }
+  if (V.err) {
+    el.innerHTML = `<div class="card lockcard"><h2>Vault</h2><p class="muted" style="margin:0">${V.err === 'old_script'
+      ? "Your sheet's script is an older version without the vault. Paste the latest Code.gs into Apps Script, then Deploy → Manage deployments → pencil → New version."
+      : "Couldn't reach the sheet. Check the connection."}</p><div><button class="btn primary" type="button" data-act="v-retry">Try again</button></div></div>`;
+    return;
+  }
+  if (!V.meta) {
+    el.innerHTML = `<div class="card lockcard"><h2>Create your vault</h2>
+      <p style="margin:0">Choose a <b>master passphrase</b>. Everything in the vault is locked with it on this phone before it goes to Google. The sheet only ever holds scrambled text.</p>
+      <div class="warnbox"><b>Write it on paper and keep it safe.</b> If you forget it, the vault cannot be opened by anyone, not even you, Google or Claude.</div>
+      <form id="vCreate" class="connect" novalidate autocomplete="off">
+        <label class="field"><span>Master passphrase (at least 12 characters; 4–6 random words is best)</span><input id="vP1" type="password" autocomplete="new-password" spellcheck="false"></label>
+        <label class="field"><span>Type it again</span><input id="vP2" type="password" autocomplete="new-password" spellcheck="false"></label>
+        <label class="ck-line"><input id="vPaper" type="checkbox"> I have written my passphrase on paper.</label>
+        <div class="err" id="vErr" hidden></div>
+        <div><button class="btn primary" type="submit" id="vGo">Create vault</button></div>
+      </form></div>`;
+    return;
+  }
+  if (!V.key) {
+    el.innerHTML = `<div class="card lockcard"><h2>Vault is locked</h2>
+      <form id="vUnlock" class="connect" novalidate autocomplete="off">
+        <label class="field"><span>Master passphrase</span><input id="vPass" type="password" autocomplete="current-password" spellcheck="false"></label>
+        <div class="err" id="vErr" hidden></div>
+        <div><button class="btn primary" type="submit" id="vGo">Unlock</button></div>
+      </form>
+      <p class="hint" style="margin:0">It locks itself after 2 minutes without a tap. Nothing readable is saved on this phone.</p></div>`;
+    setTimeout(() => { const i = $('#vPass'); if (i && state.view === 'vault') i.focus(); }, 30);
+    return;
+  }
+  el.innerHTML = `<div class="vbar"><input id="vQ" type="search" placeholder="Search the vault" aria-label="Search the vault" value="${esc(V.q)}" autocomplete="off">
+      <button class="btn" type="button" data-act="v-lock">🔒 Lock</button></div>
+    <div id="vLists" style="display:flex;flex-direction:column;gap:16px"></div>
+    <div class="row-actions" style="padding:0"><button class="btn sm" type="button" data-act="v-pass">Change passphrase</button>
+      <span class="hint" style="align-self:center">Locks after 2 minutes without a tap.</span></div>`;
+  renderVaultLists();
+}
+function renderVaultLists() {
+  const box = $('#vLists'); if (!box) return;
+  const q = V.q.trim().toLowerCase();
+  const broken = V.rows.filter(r => r.t === 'broken').length;
+  box.innerHTML = VAULT_TABLES.map(t => {
+    const cols = vCols(t.k);
+    let list = V.rows.filter(r => r.t === t.k).sort((a, b) => String(a.c[0] || '').localeCompare(String(b.c[0] || '')));
+    const total = list.length;
+    if (q) list = list.filter(r => r.c.some(v => String(v || '').toLowerCase().includes(q)));
+    const rowsHtml = list.map(r => {
+      const open = !!V.open[r.id];
+      const sub = t.show.slice(1).map(i => r.c[i]).filter(Boolean).map(esc).join(' · ');
+      return `<div class="vrow"><button class="vhead" type="button" data-act="v-toggle" data-id="${r.id}" aria-expanded="${open}">
+          <span><span class="t1">${esc(r.c[0] || '(no name)')}</span>${sub ? `<br><span class="t2">${sub}</span>` : ''}</span><span class="hint">${open ? '▲' : '▼'}</span></button>
+        ${open ? `<div class="vbody">${cols.map((c, i) => { const v = String(r.c[i] || ''); if (!v) return ''; const key = r.id + ':' + i, vis = t.show.includes(i) || V.shown[key];
+          return `<div class="vf"><span class="k">${esc(c)}</span><span class="v${vis ? '' : ' masked'}">${vis ? esc(v) : '••••••••'}</span>
+            <span class="a">${t.show.includes(i) ? '' : `<button class="btn sm" type="button" data-act="v-show" data-k="${key}">${vis ? 'Hide' : 'Show'}</button>`}<button class="btn sm" type="button" data-act="v-copy" data-id="${r.id}" data-i="${i}">Copy</button></span></div>`; }).join('')}
+          <div class="vacts"><button class="btn sm" type="button" data-act="v-edit" data-id="${r.id}">Edit</button><button class="btn sm danger" type="button" data-act="v-del" data-id="${r.id}">Delete</button></div></div>` : ''}</div>`;
+    }).join('');
+    return `<section class="card"><div class="sec-h"><h2>${esc(t.title)}</h2><span class="hint">${total} saved</span></div>
+      ${rowsHtml || `<div class="empty">${q ? 'No match.' : 'Nothing yet. Add your first ' + t.one + '.'}</div>`}
+      <div class="row-actions"><button class="btn sm primary" type="button" data-act="v-add" data-t="${t.k}">+ Add ${t.one}</button><button class="btn sm" type="button" data-act="v-cols" data-t="${t.k}">Rename columns</button></div></section>`;
+  }).join('') + (broken ? `<div class="banner warn">${broken} row${broken === 1 ? '' : 's'} could not be opened with this passphrase. They may have been changed outside the app.</div>` : '');
+}
+function vForm(html) { const f = $('#vaultForm'); f.innerHTML = html; $('#vaultScrim').hidden = false; setTimeout(() => { const i = f.querySelector('input'); if (i) i.focus(); }, 30); }
+function vEditRow(tk, id) {
+  const t = VAULT_TABLES.find(x => x.k === tk), cols = vCols(tk), r = id ? V.rows.find(x => x.id === id) : null;
+  vForm(`<h3>${r ? 'Edit' : 'Add'} ${esc(t.one)}</h3>
+    <input type="hidden" id="vfT" value="${tk}"><input type="hidden" id="vfId" value="${r ? r.id : ''}">
+    ${cols.map((c, i) => `<label class="field"><span>${esc(c)}${i === 0 ? ' (required)' : ''}</span><input id="vf${i}" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" data-lpignore="true" value="${r ? esc(r.c[i] || '') : ''}"></label>`).join('')}
+    <div class="err" id="vfErr" hidden></div>
+    <div class="sheet-actions"><button type="button" class="btn ghost" data-act="v-close">Cancel</button>
+      ${r ? '' : '<button type="button" class="btn" data-act="v-save-again">Save &amp; add another</button>'}
+      <button type="submit" class="btn primary" id="vfSave">Save</button></div>`);
+}
+async function vSaveRow(again) {
+  const tk = $('#vfT').value, id = $('#vfId').value || vId(), n = vCols(tk).length, err = $('#vfErr');
+  const c = Array.from({length: n}, (_, i) => $('#vf' + i).value.trim());
+  if (!c[0]) { err.textContent = 'Fill in the first box (a name for this row).'; err.hidden = false; return; }
+  if (V.busy) return; V.busy = true; err.hidden = true;
+  document.querySelectorAll('#vaultForm button').forEach(b => { b.disabled = true; });
+  try {
+    const ep = V.epoch;
+    const data = await vSeal(V.key, id, {t: tk, c, at: Date.now()});
+    await vCall([{t: 'vput', id, data}]);
+    if (ep !== V.epoch) { V.busy = false; return; }
+    if (V.enc[id] !== data) throw {code: 'not_saved'};
+    await vDecryptAll(); toast('Saved, encrypted');
+    if (again) vEditRow(tk, null); else { $('#vaultScrim').hidden = true; $('#vaultForm').innerHTML = ''; }
+    renderVaultLists();
+  } catch (e) {
+    err.textContent = e && e.code === 'old_script' ? 'The sheet needs the latest script (vault version).' : "Couldn't save. Nothing was changed. Check the connection and try again.";
+    err.hidden = false;
+  }
+  V.busy = false; document.querySelectorAll('#vaultForm button').forEach(b => { b.disabled = false; });
+}
+async function vCreate(ev) {
+  ev.preventDefault();
+  const p1 = $('#vP1').value, p2 = $('#vP2').value, err = $('#vErr'), go = $('#vGo');
+  err.hidden = true;
+  if (p1.length < 12) { err.textContent = 'Use at least 12 characters. 4–6 random words is strongest and easiest to remember.'; err.hidden = false; return; }
+  if (p1 !== p2) { err.textContent = 'The two passphrases are different.'; err.hidden = false; return; }
+  if (!$('#vPaper').checked) { err.textContent = 'Write the passphrase on paper first, then tick the box.'; err.hidden = false; return; }
+  go.disabled = true; go.textContent = 'Creating…';
+  try {
+    const salt = crypto.getRandomValues(new Uint8Array(16)), key = await vDerive(p1, salt, VAULT_ROUNDS);
+    const meta = {v: 1, kdf: 'PBKDF2-SHA256', rounds: VAULT_ROUNDS, salt: b64e(salt), check: await vSeal(key, '_check', {ok: 'budget-vault'})};
+    await vCall([{t: 'vput', id: '_meta', data: 'meta.' + btoa(JSON.stringify(meta))}]);
+    if (!V.meta) throw {code: 'not_saved'};
+    V.key = key; V.last = Date.now(); await vDecryptAll(); toast('Vault created'); renderVault();
+  } catch (e) { err.textContent = e && e.code === 'old_script' ? 'The sheet needs the latest script (vault version).' : "Couldn't create the vault. Check the connection and try again."; err.hidden = false; go.disabled = false; go.textContent = 'Create vault'; }
+}
+async function vUnlock(ev) {
+  ev.preventDefault();
+  const pass = $('#vPass').value, err = $('#vErr'), go = $('#vGo');
+  err.hidden = true; go.disabled = true; go.textContent = 'Unlocking…';
+  try {
+    const ep = V.epoch;
+    const key = await vDerive(pass, b64d(V.meta.salt), V.meta.rounds || VAULT_ROUNDS);
+    await vOpen(key, '_check', V.meta.check);
+    if (ep !== V.epoch) return;
+    V.key = key; V.last = Date.now();
+    try { await vCall([]); } catch (e) {} // pick up rows saved from other devices
+    await vDecryptAll(); renderVault();
+  } catch (e) { err.textContent = 'Wrong passphrase.'; err.hidden = false; go.disabled = false; go.textContent = 'Unlock'; $('#vPass').select(); }
+}
+function vColsForm(tk) {
+  const t = VAULT_TABLES.find(x => x.k === tk), cols = vCols(tk);
+  vForm(`<h3>Rename columns: ${esc(t.title)}</h3><input type="hidden" id="vcT" value="${tk}">
+    ${cols.map((c, i) => `<label class="field"><span>Column ${i + 1}</span><input id="vc${i}" type="text" autocomplete="off" value="${esc(c)}" placeholder="${esc(t.cols[i])}"></label>`).join('')}
+    <div class="err" id="vfErr" hidden></div>
+    <div class="sheet-actions"><button type="button" class="btn ghost" data-act="v-close">Cancel</button><button type="button" class="btn primary" data-act="v-cols-save">Save names</button></div>`);
+}
+async function vSaveCols() {
+  const tk = $('#vcT').value, t = VAULT_TABLES.find(x => x.k === tk), err = $('#vfErr');
+  const names = t.cols.map((d, i) => $('#vc' + i).value.trim() || d);
+  const schema = Object.assign({}, V.schema || {}, {[tk]: names});
+  try { const data = await vSeal(V.key, '_schema', {cols: schema}); await vCall([{t: 'vput', id: '_schema', data}]); await vDecryptAll(); $('#vaultScrim').hidden = true; toast('Column names saved'); renderVaultLists(); }
+  catch (e) { err.textContent = "Couldn't save. Check the connection."; err.hidden = false; }
+}
+function vPassForm() {
+  vForm(`<h3>Change passphrase</h3>
+    <label class="field"><span>Current passphrase</span><input id="vcp0" type="password" autocomplete="current-password"></label>
+    <label class="field"><span>New passphrase (at least 12 characters)</span><input id="vcp1" type="password" autocomplete="new-password"></label>
+    <label class="field"><span>New passphrase again</span><input id="vcp2" type="password" autocomplete="new-password"></label>
+    <div class="warnbox">Write the new passphrase on paper before you save. The old one stops working.</div>
+    <div class="err" id="vfErr" hidden></div>
+    <div class="sheet-actions"><button type="button" class="btn ghost" data-act="v-close">Cancel</button><button type="button" class="btn primary" data-act="v-pass-save" id="vcpGo">Change passphrase</button></div>`);
+}
+async function vSavePass() {
+  const p0 = $('#vcp0').value, p1 = $('#vcp1').value, p2 = $('#vcp2').value, err = $('#vfErr'), go = $('#vcpGo');
+  err.hidden = true;
+  if (p1.length < 12) { err.textContent = 'Use at least 12 characters.'; err.hidden = false; return; }
+  if (p1 !== p2) { err.textContent = 'The two new passphrases are different.'; err.hidden = false; return; }
+  go.disabled = true; go.textContent = 'Re-encrypting…';
+  try {
+    const oldKey = await vDerive(p0, b64d(V.meta.salt), V.meta.rounds || VAULT_ROUNDS);
+    try { await vOpen(oldKey, '_check', V.meta.check); } catch (e) { throw {code: 'wrong'}; }
+    const salt = crypto.getRandomValues(new Uint8Array(16)), key = await vDerive(p1, salt, VAULT_ROUNDS);
+    const ops = [{t: 'vput', id: '_meta', data: 'meta.' + btoa(JSON.stringify({v: 1, kdf: 'PBKDF2-SHA256', rounds: VAULT_ROUNDS, salt: b64e(salt), check: await vSeal(key, '_check', {ok: 'budget-vault'})}))}];
+    if (V.schema) ops.push({t: 'vput', id: '_schema', data: await vSeal(key, '_schema', {cols: V.schema})});
+    for (const r of V.rows) if (r.t !== 'broken') ops.push({t: 'vput', id: r.id, data: await vSeal(key, r.id, {t: r.t, c: r.c, at: r.at})});
+    const ep = V.epoch;
+    await vCall(ops);
+    if (ep !== V.epoch) return; // locked meanwhile: the new passphrase is saved, open it again with that
+    V.key = key; await vDecryptAll(); $('#vaultScrim').hidden = true; toast('Passphrase changed'); renderVault();
+  } catch (e) { err.textContent = e && e.code === 'wrong' ? 'The current passphrase is wrong.' : "Couldn't change it. Nothing was changed. Try again."; err.hidden = false; go.disabled = false; go.textContent = 'Change passphrase'; }
+}
+let clipTimer = null;
+async function vCopy(text) {
+  try { await navigator.clipboard.writeText(text); toast('Copied. Clears in 30 seconds.'); }
+  catch (e) { toast("Couldn't copy on this phone", 'bad'); return; }
+  clearTimeout(clipTimer); clipTimer = setTimeout(() => { navigator.clipboard.writeText('').catch(() => {}); }, CLIP_MS);
+}
+document.addEventListener('submit', ev => {
+  const id = ev.target && ev.target.id;
+  if (id === 'vCreate') vCreate(ev);
+  else if (id === 'vUnlock') vUnlock(ev);
+  else if (id === 'vaultForm') { ev.preventDefault(); if ($('#vfT')) vSaveRow(false); }
+});
+document.addEventListener('click', ev => {
+  const b = ev.target.closest('[data-act^="v-"]'); if (!b) return;
+  const a = b.dataset.act;
+  if (a === 'v-retry') { V.err = ''; V.loaded = false; renderVault(); return; }
+  if (!V.key && a !== 'v-close') return;
+  if (a === 'v-lock') lockVault('Vault locked');
+  else if (a === 'v-toggle') { V.open[b.dataset.id] = !V.open[b.dataset.id]; renderVaultLists(); }
+  else if (a === 'v-show') { V.shown[b.dataset.k] = !V.shown[b.dataset.k]; renderVaultLists(); }
+  else if (a === 'v-copy') { const r = V.rows.find(x => x.id === b.dataset.id); if (r) vCopy(String(r.c[+b.dataset.i] || '')); }
+  else if (a === 'v-add') vEditRow(b.dataset.t, null);
+  else if (a === 'v-edit') { const r = V.rows.find(x => x.id === b.dataset.id); if (r) vEditRow(r.t, r.id); }
+  else if (a === 'v-save-again') vSaveRow(true);
+  else if (a === 'v-close') { $('#vaultScrim').hidden = true; $('#vaultForm').innerHTML = ''; }
+  else if (a === 'v-cols') vColsForm(b.dataset.t);
+  else if (a === 'v-cols-save') vSaveCols();
+  else if (a === 'v-pass') vPassForm();
+  else if (a === 'v-pass-save') vSavePass();
+  else if (a === 'v-del') {
+    if (!arm(b, 'vdel' + b.dataset.id, 'Tap again to delete')) return;
+    vCall([{t: 'vdel', id: b.dataset.id}]).then(() => vDecryptAll()).then(() => { toast('Deleted'); renderVaultLists(); }).catch(() => toast("Couldn't delete. Try again.", 'bad'));
+  }
+});
+document.addEventListener('input', ev => { if (ev.target && ev.target.id === 'vQ') { V.q = ev.target.value; renderVaultLists(); } });
+['pointerdown', 'keydown'].forEach(t => document.addEventListener(t, () => { V.last = Date.now(); }, true));
+function vIdleCheck() { if (V.key && Date.now() - V.last > VAULT_IDLE_MS) lockVault('Vault locked after 2 minutes idle'); }
+setInterval(vIdleCheck, 5000);
+document.addEventListener('visibilitychange', vIdleCheck);
+window.addEventListener('pagehide', () => { if (V.key) lockVault(); });
 
 /* ---------- sign-in ---------- */
 let gisReady = null;
@@ -1614,6 +1920,7 @@ document.addEventListener('click', ev => {
     if (Sync.session) call([{t: 'signout'}]).catch(() => {});
     try { if (window.google && google.accounts) google.accounts.id.disableAutoSelect(); } catch (e) {}
     try { localStorage.removeItem(LS_CONN); localStorage.removeItem(LS_CACHE); localStorage.removeItem(LS_OUT); } catch (e) {}
+    lockVault(); V.loaded = false; V.meta = null; V.enc = {};
     Sync.key = ''; Sync.session = ''; Sync.me = null; Sync.users = null; Sync.outbox = []; Sync.last = 0;
     state.config = null; state.cycles = {}; state.balances = {}; state.cardfix = {}; state.got.config = false; state.dirty = false; state.draft = null;
     render();

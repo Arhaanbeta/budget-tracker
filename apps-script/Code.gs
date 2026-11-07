@@ -21,7 +21,9 @@ var TABS = {
   Balances: ['Date', 'Account ID', 'Account', 'Balance'],
   CardFix: ['Card ID', 'Card', 'Statement date', 'Your figure'],
   Config: ['Key', 'Value', 'Note'],
-  Users: ['Email', 'Name', 'Role', 'Added by', 'Added at']
+  Users: ['Email', 'Name', 'Role', 'Added by', 'Added at'],
+  // Encrypted on the phone before it arrives. This script never sees readable vault data.
+  Vault: ['ID', 'Encrypted data', 'Saved at']
 };
 var E = {id: 0, date: 1, cycle: 2, type: 3, catName: 4, amount: 5, acctName: 6, cardName: 7, note: 8, member: 9, tag: 10,
          refund: 11, cat: 12, acct: 13, card: 14, at: 15, saved: 16};
@@ -48,17 +50,20 @@ function doPost(e) {
     if (req.emailLink) return out(sendLoginLink(ss, req.emailLink));
     var who = authorise(ss, req);
     if (!who.ok) return out(who);
-    var ops = Array.isArray(req.ops) ? req.ops : [];
+    var ops = Array.isArray(req.ops) ? req.ops : [], vaultOps = [];
     for (var i = 0; i < ops.length; i++) {
       var op = ops[i] || {};
       if (op.t === 'signout') { if (req.session) PropertiesService.getScriptProperties().deleteProperty('sess:' + req.session); return out({ok: true, signedOut: true}); }
       if (op.t === 'adduser' || op.t === 'deluser') { userOp(ss, op, who.user); continue; }
+      if (op.t === 'vput' || op.t === 'vdel') { vaultOps.push(op); continue; }
       applyOp(ss, op);
     }
+    vaultApply(ss, vaultOps, who.user);
     if (ops.length) SpreadsheetApp.flush();
     var reply = {ok: true, applied: ops.length, data: readAll(ss), me: who.user, at: Date.now()};
     if (who.session) reply.session = who.session;
     if (who.user.role === 'Owner') reply.users = listUsers(ss);
+    if (req.vault && who.user.role === 'Owner') reply.vault = readVault(ss);
     return out(reply);
   } catch (err) {
     return out({ok: false, error: String(err && err.message || err)});
@@ -172,6 +177,30 @@ function userOp(ss, op, me) {
     if (u.role === 'Owner' && owners.length < 2) return; // never remove the last owner
     sh.deleteRow(u.row);
   }
+}
+
+/* ---------- vault (owners only; holds only encrypted text) ---------- */
+// Applies all vault changes in one read and one write.
+function vaultApply(ss, ops, me) {
+  if (!ops.length || !me || me.role !== 'Owner') return;
+  var sh = ss.getSheetByName('Vault'), old = rows(sh), map = {}, list = [];
+  old.forEach(function (r) { if (r[0]) { map[String(r[0])] = list.length; list.push([String(r[0]), String(r[1]), r[2]]); } });
+  ops.forEach(function (op) {
+    var id = String(op.id || '');
+    if (!/^[A-Za-z0-9_\-]{1,64}$/.test(id)) return;
+    if (op.t === 'vdel') { if (id in map) { list[map[id]] = null; delete map[id]; } return; }
+    var data = String(op.data || '');
+    if (!/^v1\.[A-Za-z0-9+\/=]+\.[A-Za-z0-9+\/=]+$/.test(data) && !/^meta\.[A-Za-z0-9+\/=]+$/.test(data)) return; // only encrypted text
+    var row = [id, data, stamp()];
+    if (id in map) list[map[id]] = row; else { map[id] = list.length; list.push(row); }
+  });
+  list = list.filter(Boolean);
+  if (list.length) sh.getRange(2, 1, list.length, 3).setNumberFormat('@').setValues(list);
+  if (old.length > list.length) sh.getRange(2 + list.length, 1, old.length - list.length, 3).clearContent();
+}
+function readVault(ss) {
+  return rows(ss.getSheetByName('Vault')).filter(function (r) { return r[0] && r[1]; })
+    .map(function (r) { return {id: String(r[0]), data: String(r[1])}; });
 }
 
 /* ---------- sheet helpers ---------- */
