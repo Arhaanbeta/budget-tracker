@@ -18,15 +18,12 @@ You can also type a row straight into the `Entries` tab: fill **Date**, **Catego
 ## One-time setup of the sheet back end
 
 1. Open the *Budget Tracker data* sheet → **Extensions → Apps Script**.
-2. Delete what is in `Code.gs`, paste all of `apps-script/Code.gs` from this repository, and click **Save**.
-3. **Project Settings** (gear icon) → **Script properties → Add script property**. Property `APP_KEY`, value: a long passphrase you make up. Save.
-4. **Deploy → New deployment → Select type: Web app**.
-   - Execute as: **Me**
-   - Who has access: **Anyone**
-   - Click **Deploy**, allow the permissions, and copy the **Web app URL** (it ends in `/exec`).
-5. On each phone: open the app, paste the URL and the key, tap **Connect**.
+2. Delete what is in `Code.gs`, paste all of [`apps-script/Code.gs`](apps-script/Code.gs) (use GitHub's copy button), and click **Save**.
+3. **Deploy → New deployment → Select type: Web app**. Execute as: **Me**. Who has access: **Anyone**. Click **Deploy** and allow the permissions.
+4. Open the **Web app URL** it gives you (ends in `/exec`). The script makes its own access key and shows a **one-tap phone link**. Save that link somewhere private; the page shows it only once.
+5. Open the link on each phone. The app connects by itself.
 
-"Anyone" means anyone *with the URL* can reach the script, but the script refuses every request without the right `APP_KEY`. Keep the URL and key private, like a password.
+"Anyone" means anyone *with the URL* can reach the script, but it refuses every request without the access key, and the key travels only inside the phone link. Treat that link like a password. To cancel it, delete the `APP_KEY` script property and open the Web app URL again for a new link.
 
 **Updating the script later:** paste the new code, then **Deploy → Manage deployments → Edit (pencil) → Version: New version → Deploy**. The URL stays the same.
 

@@ -1490,6 +1490,13 @@ document.addEventListener('click', ev => {
 
 /* ---------- start ---------- */
 function start() {
+  // One-tap set-up link: #connect=<base64 of {"url":…,"key":…}>. The part after # never reaches GitHub's server.
+  const m = location.hash.match(/^#connect=([A-Za-z0-9_\-+/=]+)$/);
+  if (m) {
+    try { const j = JSON.parse(atob(m[1].replace(/-/g, '+').replace(/_/g, '/')));
+      if (j && /^https:\/\/script\.google\.com\//.test(j.url) && j.key) localStorage.setItem(LS_CONN, JSON.stringify({url: j.url, key: j.key})); } catch (e) {}
+    history.replaceState(null, '', location.pathname + '#overview');
+  }
   state.view = VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'overview';
   const c = readConn();
   if (c && c.url && c.key) { Sync.url = c.url; Sync.key = c.key; state.mode = 'cloud'; loadCache(); }

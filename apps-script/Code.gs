@@ -21,8 +21,32 @@ var E = {id: 0, date: 1, cycle: 2, type: 3, catName: 4, amount: 5, acctName: 6, 
          refund: 11, cat: 12, acct: 13, card: 14, at: 15, saved: 16};
 var CHUNK = 40000; // characters per Config cell
 
+var APP_URL = 'https://arhaanbeta.github.io/budget-tracker/';
+
+/* The first time the owner opens the Web app URL, the script makes its own access key and
+   shows a one-tap link that connects a phone. After that it never shows the key again. */
 function doGet() {
-  return out({ok: true, app: 'budget-tracker', message: 'The back end is running. The app talks to it with POST.'});
+  var props = PropertiesService.getScriptProperties(), lock = LockService.getScriptLock(), key, fresh = false;
+  lock.waitLock(20000);
+  try {
+    key = props.getProperty('APP_KEY');
+    if (!key) {
+      key = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '').slice(0, 40);
+      props.setProperty('APP_KEY', key); fresh = true;
+    }
+  } finally { lock.releaseLock(); }
+  var page = '<meta name="viewport" content="width=device-width,initial-scale=1"><div style="font:16px/1.5 Arial,sans-serif;max-width:560px;margin:24px auto;padding:0 16px">';
+  if (fresh) {
+    var link = APP_URL + '#connect=' + Utilities.base64EncodeWebSafe(JSON.stringify({url: ScriptApp.getService().getUrl(), key: key}));
+    page += '<h2>Budget Tracker is connected to this sheet</h2>' +
+      '<p><b>Open this link on each phone</b> (send it to yourself on WhatsApp or email). It connects the app in one tap.</p>' +
+      '<p><a target="_blank" style="word-break:break-all" href="' + link + '">' + link + '</a></p>' +
+      '<p>Save this link somewhere private, like a note. This page shows it only once. Anyone with the link can see and change your budget.</p>' +
+      '<p style="color:#666;font-size:13px">Lost it? In Apps Script open Project Settings, delete the APP_KEY script property, then open this page again for a new link. Old links stop working.</p>';
+  } else {
+    page += '<h2>Budget Tracker back end is running</h2><p>The phone link was already shown once. To make a new one, delete the APP_KEY script property in Apps Script → Project Settings, then open this page again.</p>';
+  }
+  return HtmlService.createHtmlOutput(page + '</div>').setTitle('Budget Tracker set-up');
 }
 
 function doPost(e) {
